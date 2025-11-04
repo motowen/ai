@@ -1,0 +1,328 @@
+目前這套event driven + rule engine設計得比較有彈性
+使用者需要註冊event / rule / processor / 跟實作processor
+rule需要寫before跟after的event id, event bus 用nats jetstream,
+是否可以用混合型, 部分比較複雜的flow再使用workflow engine?
+此外, workflow engine想要自己用golang實作基本功能即可, 不需要太複雜的功能
+
+結論先講在前面：
+可以用混合型，而且蠻符合你現在的架構：
+多數簡單 flow 繼續走「Event + Rule + Processor」。
+只有「跨多個服務、長交易、要看 process 狀態」的複雜 flow 才交給 workflow engine orchestrate。
+自己用 Go 寫一個「輕量版 workflow engine」是可行的，但要刻清楚邊界：
+不要重造一個 Temporal / Camunda。
+抓住「狀態機 + 等事件 + timeout/retry + 查詢狀態」這幾個最小功能就好。
+下面拆成兩塊來講：
+A. 混合架構怎麼玩，跟你現有 event + rule engine 怎麼接
+B. 一個「用 Go 自己寫 mini workflow engine」的實作藍圖（概念＋資料結構＋簡化流程）
+
+A. 混合架構：Event + Rule Engine +（部分）Workflow
+你現在的系統特徵整理一下：
+Event Bus: NATS JetStream
+使用者可以註冊：
+Event（ID / schema）
+Rule（before event id / after event id）
+Processor（邏輯實作）
+Rule 決定「某個 event 來，要丟哪個 processor」，
+processor 處理完再產生下一個 event。
+這本質上已經是一個「高度可配置的 choreography system」。
+
+1. 混合模式的核心想法
+新增一種「Processor 類型 = WorkflowProcessor」：
+對於 簡單 flow：
+事件 → Rule → 普通 Processor → 新事件
+對於 複雜 flow：
+事件 → Rule → WorkflowProcessor →
+由 WorkflowProcessor 呼叫你的 mini workflow engine：
+StartWorkflow(defId, businessKey, initialData)
+或 SignalWorkflow(defId, businessKey, event)
+然後 workflow engine 會在內部決定：
+下一步要發什麼事件
+把這個事件再丟回 NATS → 進入原本的 Rule Engine → 轉給對應的業務 Processor
+這樣：
+Rule Engine 不需要大改：只是多一個 Processor type。
+Workflow Engine 不搶掉原有 Processor 的工作：
+它只 orchestrate「下一個要發哪個 event」，具體執行還是你的 Processor。
+
+2. 事件流示意（簡化）
+以「訂單流程」的一段為例：
+OrderCreated event 進 NATS。
+Rule Engine 根據 rule 判斷：
+OrderCreated → Processor = OrderWorkflowProcessor
+OrderWorkflowProcessor：
+呼叫 mini workflow engine：StartWorkflow("order_v1", orderId, {...})
+Workflow engine 建立一個 instance，第一步是：
+發出 Inventory.ReserveCommand event → NATS
+Rule Engine 收到 Inventory.ReserveCommand：
+
+根據 rule route 到 InventoryReserveProcessor
+
+InventoryReserveProcessor 真正去扣庫存，然後 emit：
+
+Inventory.Reserved 或 Inventory.ReserveFailed
+
+Inventory.Reserved event 進 NATS：
+
+Rule Engine 可以同時：
+
+route 給其他需要的 Processor（例如 audit log）
+
+route 給 OrderWorkflowProcessor → 內部再交給 workflow engine 做 state transition，決定下一步（例如 Payment.ChargeCommand）
+
+這就是你說的「混合型」：
+業務邏輯留在現有 Processor，跨 step 的流程狀態與順序交給 workflow。
+
+B. 用 Go 實作一個「輕量版」 Workflow Engine
+
+你說「只要基本功能，不要太複雜」，那我會建議鎖定這幾個能力就好：
+
+定義一個流程（workflow definition）：步驟、順序、條件。
+
+建立流程 instance（start）。
+
+步驟可以：
+
+發出一個 command event（給其他 Processor 處理）
+
+等待某種 event 回來（含 correlationId）。
+
+支援：
+
+基本 retry policy（例如某 Step 失敗可 retry 3 次）
+
+Step timeout（超時就走到某個錯誤/補償 step）
+
+提供 API 查詢狀態：
+GET /workflow/{businessKey} → 現在在哪個 step、狀態是什麼。
+
+不用一開始就上 parallel、子流程、動態遷移之類的。
+
+1. 核心概念與資料模型
+
+用 pseudo struct 表一下概念（不是最終 code，只是幫你想模型）：
+
+Workflow Definition
+type WorkflowDefinition struct {
+    ID      string         // e.g. "order_v1"
+    Version int
+    Steps   []StepDef
+}
+
+type StepType string
+
+const (
+    StepTypeEmitEvent StepType = "emit_event"
+    StepTypeWaitEvent StepType = "wait_event"
+    StepTypeChoice    StepType = "choice" // 可選, 用於根據資料分支
+)
+
+type StepDef struct {
+    ID       string            // "reserve_inventory"
+    Type     StepType
+    Config   map[string]any    // 例如 發哪個 event, 要等哪個 event, timeout 等
+    Next     string            // 下一個 step ID
+    NextOn   map[string]string // 對於 choice/wait, 根據條件決定 next
+}
+
+
+你可以把這些存 DB（Postgres / MySQL）或 YAML → 載入到記憶體。
+
+Workflow Instance（執行中的流程）
+type WorkflowStatus string
+
+const (
+    StatusRunning   WorkflowStatus = "RUNNING"
+    StatusCompleted WorkflowStatus = "COMPLETED"
+    StatusFailed    WorkflowStatus = "FAILED"
+    StatusWaiting   WorkflowStatus = "WAITING_EVENT"
+)
+
+type WorkflowInstance struct {
+    ID           string          // uuid
+    DefinitionID string          // "order_v1"
+    BusinessKey  string          // e.g. orderId
+    CurrentStep  string          // 當前 step ID
+    Status       WorkflowStatus
+    Data         json.RawMessage // 自由存一些 context data
+    RetryCount   int
+    UpdatedAt    time.Time
+    // 如果要支援 timeout:
+    WaitUntil    *time.Time      // 等待截止時間
+    ExpectedEvent string         // 當前等待的 event type (for WaitEvent step)
+}
+
+Event 與 Correlation
+
+你本來就有 event id / before / after 的概念，很好。
+在 workflow 這邊最重要的是：
+
+每個 flow 選一個 business key（例如 orderId / userId / caseId）
+
+每個 event payload / header 都要攜帶這個 key
+
+workflow engine 的 event handler 就可以：
+
+收到 event → 讀出 businessKey + eventName
+
+查 DB 找 WorkflowInstance where BusinessKey = X & Status = WAITING
+
+判斷 ExpectedEvent 是否符合 → 推進到下一步
+
+2. 執行模型（用 Go + NATS）
+
+大致會有幾個元件：
+
+API / 管理層
+
+StartWorkflow(defID, businessKey, initialData) (instanceID, error)
+
+GetWorkflowStatus(businessKey)
+
+Step Executor（工作者）
+
+接到「要執行某個 Step」的 internal command（可以是 DB row 或 NATS subject）
+
+根據 step type 決定怎麼做：
+
+emit_event → nc.Publish(subject, payload)
+
+wait_event → 不做事，只把 instance Status 設為 WAITING_EVENT，記錄 ExpectedEvent 和 WaitUntil（如果有 timeout）
+
+Event Handler（NATS Consumer）
+
+訂閱 domain events / command events（或你指定的 subset）
+
+收到 event 後抽出：
+
+eventName
+
+businessKey（例如 orderId）
+
+查 DB 找對應 instance：
+
+若 instance.Status == WAITING_EVENT 且 instance.ExpectedEvent == eventName：
+
+更新 instance 狀態回 RUNNING
+
+決定下一個 step（從 StepDef.Next 或 NextOn[...]）
+
+把「執行下一個 step」丟去 Step Executor。
+
+Timer / Timeout Handler（可選）
+
+定期掃 DB：
+
+找 Status = WAITING_EVENT 且 WaitUntil < now
+
+對這些 instance：
+
+按定義走 timeout 分支（例如 NextOn["timeout"]）
+
+或標記為 FAILED
+
+你可以用一個簡單的 Go service 把這幾個 component 放在一起跑：
+
+func main() {
+    // 1. 初始化 DB / NATS 連線
+    // 2. 啟動 event consumer (NATS -> HandleEvent)
+    // 3. 啟動 timer scanner (for timeout)
+    // 4. 提供 HTTP API (start workflow, get status)
+}
+
+3. 與你現有 Rule Engine 的整合方式
+方式 1：Workflow 當 Processor
+
+在 rule 設計上多一種 Processor type，例如：
+
+{
+  "eventId": "OrderCreated",
+  "processorType": "workflow",
+  "processorConfig": {
+    "workflowDefinitionId": "order_v1"
+  }
+}
+
+
+Runtime 時：
+
+Rule Engine 發現 processorType == "workflow" → 呼叫本地 client：
+
+StartWorkflow("order_v1", orderId, initialData)
+
+之後的事件（Inventory.Reserved / Payment.Failed …）
+也可以配置 rule 把事件送到 workflow processor，讓 workflow engine 來推進流程。
+
+優點：
+
+對既有 framework 改動小。
+
+rule 仍然控制「哪種 event 要交給 workflow」。
+
+方式 2：Workflow 只透過 NATS，不經 rule engine（不太建議）
+
+Workflow engine 直接訂閱所有需要的 subject。
+
+這樣會繞過你原本的 rule engine routing，一部分邏輯在 rule engine，一部分在 workflow，很容易亂掉。
+
+既然你現在的 rule engine 是系統核心，我會建議 方式 1：
+所有外部事件先進 rule engine，再由 rule 決定是否丟給 workflow。
+Workflow 對外同樣只是「產生新的 event」而已。
+
+4. 控制範圍：真的不要做太大
+
+自己寫 engine 的最大風險是 scope creep，所以我會建議一開始明確不做：
+
+不做：
+
+複雜併發（parallel join）
+
+動態流程修改 / 熱替換
+
+子流程 / call activity
+
+UI designer（先用 JSON/YAML 寫死 definition 即可）
+
+先做：
+
+順序流程（A → B → C）
+
+基本分支（成功 / 失敗 / timeout）
+
+等 event
+
+timeout + retry
+
+查詢狀態 API
+
+如果後面真的覺得好用，再考慮把 workflow 定義交給配置系統（UI 編輯器、DSL…）。
+
+小總結
+
+混合架構是合理、而且適合你目前架構的做法：
+
+大部分輕量、單步邏輯仍由「Event + Rule + Processor」處理。
+
+少數跨多服務、需要 Saga、需要清楚流程狀態的 flow 交給 workflow engine。
+
+技術上用「Processor type = workflow」就可以自然整合。
+
+用 Go 自己刻一個 mini workflow engine 的最小功能建議：
+
+WorkflowDefinition（step 列表）
+
+WorkflowInstance（狀態、當前 step、business key、expected event）
+
+StepExecutor：emit event or wait event
+
+EventHandler：根據 event + business key 推進流程
+
+Timer：處理 timeout
+
+API：start / query
+
+如果你願意下一步，我可以幫你：
+
+直接寫一個 更具體的 Go 介面設計 & 幾個 struct / 函式 skeleton，
+
+例如 type Engine interface { Start(...); HandleEvent(...); TickTimeouts(...) }
+
+再配一個 實作「訂單流程」的 JSON workflow 定義範例，你可以直接丟進專案慢慢長。
