@@ -1,0 +1,432 @@
+先直接用你舉的例子來設計一套「最小可用」的 workflow engine＋approval flow。
+
+你現在已經有：
+
+Event bus：NATS JetStream
+
+Rule engine：event → 找對的 processor 去處理
+
+Processor：實作各種業務邏輯
+
+我們要加的是：
+
+「一個專門負責 Approve Flow 的有狀態 orchestrator」，
+負責把「很多人的簽核」跑完後，最後丟出 org.change.approved event，
+其他 team 還是照原本 event-driven 的方式去聽這個 event 做各自的資料更新。
+
+下面我用「Org Change Approve Flow」當具體例子。
+
+1. 整體架構（文字版）
+
+流程長這樣：
+
+申請人送出「組織異動申請」
+
+UI → API → emit org.change.requested event
+
+Workflow Engine 收到 org.change.requested
+
+建立一個 WorkflowInstance（org change approval）
+
+產生這一層的 Approver 清單
+
+對每個 approver 發 approval.requested event（或寫 DB 讓前端來拉）
+
+每個 approver 在系統裡按「同意 / 駁回」
+
+UI → API → emit approval.decision event
+
+Workflow Engine 收到 approval.decision
+
+更新 workflow instance context 中對應 approver 的狀態
+
+當這一層所有人都決定：
+
+若有人 reject → emit org.change.rejected → 流程結束
+
+若全都 approve：
+
+若還有下一層 approver → 產生下一層 approval 任務，回到步驟 2
+
+若已是最後一層 → emit org.change.approved event
+
+各 team 的微服務各自訂閱：
+
+org.change.approved
+
+收到後去對應修改自己系統裡的 org 資料（choreography）
+
+整個 approve flow 是 workflow engine 管；org change 實際「改資料」仍在你原本 event-driven world 裡。
+
+2. Domain Model（針對 approval flow 簡化）
+2.1 Org Change Request（業務資料）
+type OrgChangeRequest struct {
+    ID           string    // org_change_request_id
+    RequesterID  string
+    TargetUserID string
+    OldOrgPath   string
+    NewOrgPath   string
+    Reason       string
+    Status       string    // pending/approved/rejected
+    CreatedAt    time.Time
+}
+
+2.2 Approver 設定
+
+兩種做法：
+
+靜態規則（例如根據部門層級自動算出主管 chain）
+
+存在 DB：predefined approval chain
+
+簡化一個結構：
+
+type Approver struct {
+    UserID string
+    Level  int    // 第幾層簽核 (1,2,3...)
+}
+
+2.3 Workflow Instance Context
+
+這裡就用 workflow engine 的 Context 來裝 approval 的狀態：
+
+type ApprovalStatus string
+
+const (
+    ApprovalPending  ApprovalStatus = "pending"
+    ApprovalApproved ApprovalStatus = "approved"
+    ApprovalRejected ApprovalStatus = "rejected"
+)
+
+type ApproverState struct {
+    UserID string
+    Level  int
+    Status ApprovalStatus
+}
+
+type OrgChangeApprovalContext struct {
+    OrgChangeRequestID string
+    CurrentLevel       int
+    Approvers          []ApproverState
+    FinalDecision      ApprovalStatus // pending/approved/rejected
+}
+
+
+在 WorkflowInstance.Context 裡用 JSON 存這個 struct：
+
+type WorkflowInstance struct {
+    ID            string
+    DefID         string
+    Status        WorkflowStatus
+    CurrentStepID string
+    CorrelationID string        // = OrgChangeRequestID
+    Context       json.RawMessage // 反序列化成 OrgChangeApprovalContext
+    ...
+}
+
+3. Event 設計（跟原有 event-driven 風格對齊）
+
+可以先定幾個核心事件：
+
+申請建立：
+
+org.change.requested
+
+payload：{ org_change_request_id, requester_id, target_user_id, old_org_path, new_org_path, reason }
+
+各層簽核請求：
+
+org.change.approval.requested
+
+payload：{ org_change_request_id, approver_id, level }
+
+UI / notification service 去聽，負責把「待簽核清單」顯示給使用者
+
+簽核決定：
+
+org.change.approval.decision
+
+payload：{ org_change_request_id, approver_id, level, decision (approve/reject), comment }
+
+由前端呼叫 API → API 發這個 event
+
+最終結果：
+
+org.change.approved
+
+org.change.rejected
+
+payload 至少包含：{ org_change_request_id, target_user_id, new_org_path }
+
+org change 之後各系統如要回報自己 side effect（看你要不要管）：
+
+org.change.applied.account_service
+
+org.change.applied.payroll_service
+
+...（這個可以先不讓 workflow 管，只做 fire-and-forget）
+
+4. 用「Workflow Definition」描述這個 Flow
+
+沿用前一輪跟你討論的 Step 定義，設計一個 org_change_approval_v1：
+
+4.1 Workflow Definition（概念）
+{
+  "id": "org_change_approval_v1",
+  "name": "Org Change Approval",
+  "version": 1,
+  "start_event": "org.change.requested",
+  "steps": [
+    {
+      "id": "INIT_CONTEXT",
+      "type": "task",              // 初始化 context，建立第一層 approvers
+      "emit_event": "approval.init", // 可以不真的發 event，或發給 internal processor
+      "next_on_success": "REQUEST_LEVEL_APPROVAL"
+    },
+    {
+      "id": "REQUEST_LEVEL_APPROVAL",
+      "type": "task",
+      "emit_event": "org.change.approval.requested", // 會對這一層所有 approver 發一次
+      "next_on_success": "WAIT_LEVEL_APPROVAL"
+    },
+    {
+      "id": "WAIT_LEVEL_APPROVAL",
+      "type": "waitEvent",
+      "wait_event": "org.change.approval.decision",
+      // 條件：這一層所有 approver 都已決定（approve 或 reject）
+      "condition_expr": "all_decided_for_current_level",
+      "next_on_success": "DECIDE_LEVEL_RESULT"
+    },
+    {
+      "id": "DECIDE_LEVEL_RESULT",
+      "type": "decision",
+      "condition_expr": "current_level_all_approved",
+      "next_on_success": "CHECK_IF_MORE_LEVEL",
+      "next_on_error": "FINAL_REJECTED"
+    },
+    {
+      "id": "CHECK_IF_MORE_LEVEL",
+      "type": "decision",
+      "condition_expr": "has_more_level",
+      "next_on_success": "NEXT_LEVEL",
+      "next_on_error": "FINAL_APPROVED"
+    },
+    {
+      "id": "NEXT_LEVEL",
+      "type": "task",
+      "emit_event": "approval.next_level",   // 更新 context.CurrentLevel +=1 並準備下一層 approvers
+      "next_on_success": "REQUEST_LEVEL_APPROVAL"
+    },
+    {
+      "id": "FINAL_APPROVED",
+      "type": "task",
+      "emit_event": "org.change.approved",  // 真正發 org change event 給其他 team
+      "next_on_success": "END"
+    },
+    {
+      "id": "FINAL_REJECTED",
+      "type": "task",
+      "emit_event": "org.change.rejected",
+      "next_on_success": "END"
+    },
+    {
+      "id": "END",
+      "type": "end"
+    }
+  ]
+}
+
+
+幾個重點：
+
+多層簽核是透過 CurrentLevel＋Approvers.Level 來控的，不需要為每一層定死 step 數量。
+
+WAIT_LEVEL_APPROVAL 那個 waitEvent 不是只處理「一次 event」，而是「這個 step 持續等待很多個 approval.decision event，到條件滿足才往下一步」。
+
+條件判斷邏輯寫在 engine 裡，用 condition_expr 當 key，實作成 Go function。
+
+5. Go 實作關鍵點（Pseudo-code）
+5.1 Workflow Engine 收到 org.change.requested
+func (e *Engine) handleOrgChangeRequested(msg *nats.Msg) {
+    ev := OrgChangeRequestedEvent{}
+    json.Unmarshal(msg.Data, &ev)
+
+    // 1. 建立 OrgChangeRequest (DB)
+    req := createOrgChangeRequest(ev)
+
+    // 2. 建 workflow instance
+    ctx := OrgChangeApprovalContext{
+        OrgChangeRequestID: req.ID,
+        CurrentLevel:       1,
+        Approvers:          buildFirstLevelApprovers(req),
+        FinalDecision:      ApprovalPending,
+    }
+    ctxBytes, _ := json.Marshal(ctx)
+
+    wfInst := &WorkflowInstance{
+        DefID:         "org_change_approval_v1",
+        CorrelationID: req.ID,
+        Status:        WFStatusRunning,
+        CurrentStepID: "INIT_CONTEXT",
+        Context:       ctxBytes,
+    }
+    e.insts.Create(wfInst)
+
+    // 3. 跑第一步
+    e.runStep(context.Background(), wfInst)
+}
+
+
+INIT_CONTEXT 這個 step 可以非常輕量，要嘛只是更新 context，要嘛發一個 internal event 讓某個 processor 去算 approver list 都行。
+
+5.2 收到 approval.decision → 更新 context + 檢查是否要推進 step
+func (e *Engine) handleApprovalDecision(msg *nats.Msg) {
+    ev := ApprovalDecisionEvent{}
+    json.Unmarshal(msg.Data, &ev)
+
+    // 1. 找到對應的 workflow instance (by OrgChangeRequestID)
+    wfInst, err := e.insts.FindByCorrelationID(ev.OrgChangeRequestID)
+    if err != nil || wfInst.Status != WFStatusRunning {
+        return
+    }
+
+    // 2. 反序列化 context
+    var ctx OrgChangeApprovalContext
+    json.Unmarshal(wfInst.Context, &ctx)
+
+    // 3. 更新 approver 狀態
+    updated := false
+    for i := range ctx.Approvers {
+        a := &ctx.Approvers[i]
+        if a.UserID == ev.ApproverID && a.Level == ev.Level && a.Status == ApprovalPending {
+            if ev.Decision == "approve" {
+                a.Status = ApprovalApproved
+            } else {
+                a.Status = ApprovalRejected
+            }
+            updated = true
+            break
+        }
+    }
+    if !updated {
+        // 已處理過 or 不屬於這個 instance → 忽略（idempotent）
+        return
+    }
+
+    // 4. 存回 DB
+    ctxBytes, _ := json.Marshal(ctx)
+    wfInst.Context = ctxBytes
+    e.insts.Update(wfInst)
+
+    // 5. 檢查這個 step 是否是 WAIT_LEVEL_APPROVAL，且條件已滿足
+    if wfInst.CurrentStepID == "WAIT_LEVEL_APPROVAL" {
+        if allDecidedForCurrentLevel(&ctx) {
+            // 跳到 DECIDE_LEVEL_RESULT
+            wfInst.CurrentStepID = "DECIDE_LEVEL_RESULT"
+            e.insts.Update(wfInst)
+            e.runStep(context.Background(), wfInst)
+        }
+    }
+}
+
+
+allDecidedForCurrentLevel 就是：
+
+func allDecidedForCurrentLevel(ctx *OrgChangeApprovalContext) bool {
+    for _, a := range ctx.Approvers {
+        if a.Level == ctx.CurrentLevel && a.Status == ApprovalPending {
+            return false
+        }
+    }
+    return true
+}
+
+
+後面的 DECIDE_LEVEL_RESULT / CHECK_IF_MORE_LEVEL / NEXT_LEVEL / FINAL_APPROVED 就可以照前一輪設計，用 runStep 裡的 switch + helper functions 來實作即可。
+
+6. org change 後面很多 team 要 update 資料，怎麼接？
+
+這一段其實可以完全不放進 workflow engine：
+
+Workflow engine 在 FINAL_APPROVED step 裡發 event：
+
+org.change.approved
+
+各服務自己訂閱：
+
+account-service → 更新 AD / IAM group
+
+payroll-service → 更新薪資系統的部門、成本中心
+
+project-service → 更新專案成員 / 負責人
+
+…
+
+因為是「公司內部 org change」，你可能會有這樣的需求：
+
+希望「所有關鍵系統都更新成功」才把申請單標成完成
+
+或者「有失敗的系統要有警示」
+
+這個就有兩條路：
+
+簡單版（先做這個）：
+org.change.approved 發出去就算完成，其他服務更新失敗自己 retry / 告警。
+
+進階版（之後再加）：
+每個服務更新完發 org.change.applied.<service>，
+再做一個「org change apply workflow」，用 WaitAll pattern 等所有關鍵 service 成功或 timeout，再決定是否標記為完全完成，這又是一條新的 workflow（可以用同一個 engine 來跑）。
+
+建議先做簡單版，讓 approval 流程跑起來，再考慮收斂 side effects。
+
+7. 跟你現有 Rule Engine 的關係
+
+你原本的設計：
+
+event → rule engine → 找 processor → 執行 → 產生新的 event
+
+現在 workflow engine 插進來的位置是：
+
+只對特定 event 有興趣（例如 org.change.requested, org.change.approval.decision）
+
+workflow engine 自己是另一個 NATS consumer
+
+當它 emit org.change.approved 時，這個 event 會跟其他所有 event 一樣，進你的 rule engine → processor → 各種後續 event
+
+也就是：
+
+Rule engine：決定「某一個 event 要跑哪個 processor」
+
+Workflow engine：決定「這一整串事件們的順序、條件、等待、多層簽核」
+
+兩者職責很清楚，不會互相打架。
+
+8. 建議實作順序（避免一開始就寫太大）
+
+先做：
+
+單層多人的 approve flow
+
+沒有下一層 approver，也沒有 side-effect 回報，只要最後 emit org.change.approved
+
+再加：
+
+多層簽核（CurrentLevel 概念）
+
+再加：
+
+org.change.rejected
+
+timeout / reminder（可以用 timer step）
+
+最後才考慮：
+
+org change side effects 的 WaitAll / 監控
+
+如果你願意下一步，我可以幫你把：
+
+一個完整 org change approval flow 的 JSON workflow definition
+
+對應的 Go Engine.runStep() skeleton（包含 INIT_CONTEXT, REQUEST_LEVEL_APPROVAL, DECIDE_LEVEL_RESULT 等）
+
+寫成一份可以直接貼進專案，慢慢填空的版本。
