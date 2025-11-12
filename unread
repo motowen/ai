@@ -1,0 +1,11 @@
+調整策略 1：改用累積序號
+在群組層級維護一個整體訊息序號（或訊息總數），每次訊息只需 inc 一次，不再對每個會員寫入。
+於 chat_summary_p（或新集合）為每個成員維護 last_read_seq，未讀 = group_seq - last_read_seq，讀取時即時計算。
+需要在 group_chat_content_p（群組訊息集合）補上自增序號欄位（可由寫入流程控制），並確保透過索引（目前已有 group_id + create_time）支援依序查詢。
+既有 ReadNote 更新邏輯可以改成只寫 last_read_seq；GetNoteCountByAfterTime 也可回退為「差值計算」而不是重新掃描訊息。
+調整策略 2：改用批次/非同步寫入
+若仍想維持「每位成員都持有未讀數」的資料模型，可在 insertChatFromReceiver 中改為 Mongo 的 BulkWrite 或把更新丟到佇列，由 background worker 逐批處理，降低主線程延遲。
+佇列消費者可在 Redis 先做暫存，再定期 flush 到 Mongo（最終一致）；必要時加上重試與錯誤追蹤。
+調整策略 3：快取＋延遲計算
+將未讀計數暫存在 Redis（例如 HINCRBY group:{groupIri} member:{userIri}），同步寫入 Mongo 可以降頻或延後。
+ReadNote 時先更新 Redis，再用 pipeline 異步同步資料庫；若 Redis 失效，才回退到 GetNoteCountByAfterTime 做一次完整補算。
