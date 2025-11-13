@@ -1,0 +1,41 @@
+ai npc:
+使用各種llm跟milvus db完成RAG-Based & Scenario-Based ai npc
+technology stack: python fast api / OpenAI / milvus db / RAG / MySQL
+community: 
+使用websocket實作聊天系統, 利用go-fed這套ActivityPub framework來開發去中心化的類twitter系統
+使用JMeter做performance test, 並利用PostgreSQL explain, 找出go-fed裡面PostgreSQL的一些slow query & top wait sql, 有些重構成mongo, 有些對prepend JSON array的語法正規化, 來解決這些問題
+類twitter系統中, 使用JMeter做performance test, 實作shared inbox來解決follower太多的問題
+technology stack: golang gin / go-fed / ActivityPub / Nats / PostgreSQL / Mongo / Elasticsearch / Websocket / Unit & Feature & Testcontainers
+avatar: 
+VRM-based avatar, 完成3D Level of Detail, 先拆解成各種job EX: ktx / pbr & unlit / Blend shapes / Texture size , 利用AWS sqs & lambda完成各項job後, 再透過 AWS Appsync event通知FE.
+串接第三方outfit store / nft , 並整合點數系統跟完成vrm保護機制
+technology stack: golang gin / MySQL / AWS SQS / AWS Lambda / AWS Appsync / Crypto / Unit & Feature & Testcontainers
+point: 
+任務點數系統, 利用transaction來防止concurrency, 利用AWS sqs & lambda來實作對帳系統, 確保正確性
+technology stack: golang gin / MySQL / Redis / AWS SQS / AWS Lambda / Unit & Feature & Testcontainers
+payment: 
+原本系統有實作PCI DSS並存加密的卡號, 重購整個系統來完成PCI downgrade, 透過Adyen api來存卡號, 節省90%的成本
+實作錯誤alert機制, 發現駭客攻擊, 實作rate limit control來防止駭客攻擊
+technology stack: scala finatra / golang gin / Mongo / Redis / Adyen / PCI DSS / Feature Test & Integration Test
+account: 
+原本的account系統太過複雜, 重做一個 OAuth2/OIDC/PKCE account system, 並實作一個proxy server來避免client整合的問題
+偵測駭客攻擊sms/email, 透過Akamai block ip & ASN, 透過Vonage阻擋國家&電信商, 並實作各api rate limit control, 跟sms&email總量管制
+technology stack: scala finatra / golang gin / MySQL / OAuth2 / OIDC / PKCE / Feature Test & Integration Test
+content management service: 
+在原本的系統上開發多版本app系統, 利用AWS sqs & lambda來實作wapper & content verify等功能
+technology stack: scala finatra / Mongo / AWS SQS / AWS Lambda / Feature Test & Integration Test
+維護各種舊系統 playtime/leaderboard/drm/payout/developer console/enterprise/arcade: 
+偵測cpu&memory使用量, 發現playtime cpu high的問題並解決
+
+負責開發enterprise device management系統, 使用micro service架構, 實作大約1x個微服務, 包含account/device/content/license/warranty/rbac等等功能
+負責開發arcade系統, 使用micro service架構, 實作大約2x個微服務, 包含vendor/contract/account/content/license/invoice/revenue/trancsation/notification/report等等功能
+實作payload加解密系統, 簽章系統, 讓企業資料更加安全
+整合 AWS SQS + Lambda 實現事件驅動架構，提升系統可靠度
+撰寫自動化測試與部署腳本，降低人工作業錯誤率。
+technology stack: scala finatra / Micro Service / Mongo / Redis / AWS SES & SQS & Lambda / Feature Test & Integration Test / CICD
+轉換成Backend Engineer, 負責維護theme backend, 開發cms content verify service
+帶領3位android engineer開發下列的android app: sense tv / lockscreen 2D / task 
+負責開發windows phone IME
+負責開發Renesas 1Seg DTV EPG 
+負責開發DM320 1Seg DTV EPG
+負責整合wtls protocol 
