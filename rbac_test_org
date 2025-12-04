@@ -1,0 +1,413 @@
+class OrganizationControllerFeatureTest extends ControllerFeatureTest {
+
+  def createPermission(names: Vector[Name]): Vector[Permission] = {
+    val reqs = names.map(name => PermissionRequest(Key(UUID.randomUUID().toString), name))
+    val resp = server.httpPostJson[CreatePermissionResponse](
+      path = CREATE_PERMISSION_V1_API,
+      postBody = mapper.writeValueAsString(CreatePermissionRequest(reqs)),
+      andExpect = Ok
+    )
+    resp.permissions
+  }
+
+  def createRole(roles: Vector[RoleRequest]): Vector[Role] = {
+    val resp = server.httpPostJson[CreateRoleResponse](
+      path = CREATE_ROLE_V1_API,
+      postBody = mapper.writeValueAsString(CreateRoleRequest(roles)),
+      andExpect = Ok
+    )
+    resp.roles
+  }
+
+  def createGroup(name: Name, remark: Option[Remark]): Group =
+    server.httpPostJson[Group](
+      path = CREATE_GROUP_V1_API,
+      headers = Map("oid" -> orgId.value.toString),
+      postBody = mapper.writeValueAsString(CreateGroupRequest(orgId, name, remark)),
+      andExpect = Ok
+    )
+
+  private[this] def roleAddPermission(rid: RoleId, pids: Vector[PermissionId]) = {
+    val addReq = RoleAddPermissionRequest(rid, pids)
+    server.httpPost(
+      path = ROLE_ADD_PERMISSION_V1_API,
+      postBody = mapper.writeValueAsString(addReq)
+    )
+  }
+
+  private[this] def groupAddRole(gid: GroupId, rids: Vector[RoleId]) = {
+    val addReq = AddGroupRoleRequest(orgId, gid, rids)
+    server.httpPost(
+      path = ADD_GROUP_ROLE_V1_API,
+      headers = Map("oid" -> orgId.value.toString),
+      postBody = mapper.writeValueAsString(addReq)
+    )
+  }
+
+  private[this] def checkPermission(permissions: Vector[Permission]) = {
+    val resp = server.httpGetJson[GetUserPermissionResponse](
+      path = s"${GET_USER_PERMISSION_V1_API}?oid=${orgId.value.toString}&uid=${uid.value.toString}",
+      andExpect = Ok
+    )
+
+    resp.permissions.map(permission => assertResult(true)(permissions.exists(p => p == permission)))
+  }
+
+  private[this] def checkUserHavePermission(pkeys: Vector[Key], resultKeys: Vector[Key]) = {
+    val req  = CheckUserPermissionRequest(orgId, uid, pkeys)
+    val resp = CheckUserPermissionResponse(orgId, uid, resultKeys)
+    server.httpPost(
+      path = CHECK_USER_PERMISSION_V1_API,
+      headers = Map("oid" -> orgId.value.toString, "uid" -> uid.value.toString),
+      postBody = mapper.writeValueAsString(req),
+      andExpect = Ok,
+      withJsonBody = mapper.writeValueAsString(resp)
+    )
+  }
+
+  private[this] def checkUser(roles: Vector[RoleBase], gids: Vector[GroupId]) = {
+    val userResp = GetUserResponse(Vector(UserBase(uid, roles.map(_.rid), gids)))
+    server.httpGet(
+      path = s"${GET_USER_V1_API}?oid=${orgId.value.toString}",
+      andExpect = Ok,
+      withJsonBody = mapper.writeValueAsString(userResp)
+    )
+  }
+
+  private[this] def checkEmptyUser() = {
+    val userResp = GetUserResponse(Vector())
+    server.httpGet(
+      path = s"${GET_USER_V1_API}?oid=${orgId.value.toString}",
+      andExpect = Ok,
+      withJsonBody = mapper.writeValueAsString(userResp)
+    )
+  }
+
+  private[this] def checkOrganization(permissions: Vector[Permission]) = {
+    val orgBase = PermissionBase(orgId, permissions.toSet)
+    server.httpGet(
+      path = s"${USER_GET_PERMISSIONS_V1_API}?uid=${uid.value.toString}",
+      andExpect = Ok,
+      withJsonBody = mapper.writeValueAsString(UserGetPermissionsResponse(Vector(orgBase)))
+    )
+  }
+
+  private[this] def checkEmptyOrganization() =
+    server.httpGet(
+      path = s"${USER_GET_PERMISSIONS_V1_API}?uid=${uid.value.toString}",
+      andExpect = Ok,
+      withJsonBody = mapper.writeValueAsString(UserGetPermissionsResponse(Vector()))
+    )
+
+  private[this] def upsertRoleUser(rids: Vector[RoleId]) = {
+    val roleReq = ReplaceUserRolesRequest(orgId, uid, rids)
+    server.httpPut(
+      path = REPLACE_USER_ROLE_V1_API,
+      headers = Map("oid" -> orgId.value.toString, "uid" -> uid.value.toString),
+      putBody = mapper.writeValueAsString(roleReq),
+      andExpect = Ok,
+      withJsonBody = mapper.writeValueAsString(roleReq)
+    )
+  }
+
+  private[this] def removeUser() = {
+    val removeReq = RemoveUserRequest(orgId, uid)
+    server.httpDelete(
+      path = REMOVE_USER_V1_API,
+      headers = Map("oid" -> orgId.value.toString, "uid" -> uid.value.toString),
+      andExpect = Ok
+    )
+  }
+
+  private[this] def upsertRoleUserByKey(keys: Vector[Key]) = {
+    val roleReq = ReplaceUserRolesByKeyRequest(orgId, uid, keys)
+    server.httpPut(
+      path = REPLACE_USER_ROLE_BY_KEY_V1_API,
+      headers = Map("oid" -> orgId.value.toString, "uid" -> uid.value.toString),
+      putBody = mapper.writeValueAsString(roleReq),
+      andExpect = Ok,
+      withJsonBody = mapper.writeValueAsString(roleReq)
+    )
+  }
+
+  private[this] def upsertGroupUser(gids: Vector[GroupId]) = {
+    val groupReq = ReplaceUserGroupsRequest(orgId, uid, gids)
+    server.httpPut(
+      path = REPLACE_USER_GROUP_V1_API,
+      headers = Map("oid" -> orgId.value.toString, "uid" -> uid.value.toString),
+      putBody = mapper.writeValueAsString(groupReq),
+      andExpect = Ok,
+      withJsonBody = mapper.writeValueAsString(groupReq)
+    )
+  }
+
+  private[this] def userGetRoles(uid: UserId, oid: OrganizationId, rids: Vector[RoleId]) = {
+    val resp = server.httpGetJson[UserGetRolesResponse](
+      path = s"${USER_GET_ROLES_V1_API}?uid=${uid.value.toString}",
+      andExpect = Ok
+    )
+
+    resp.organizations.filter(org => org.oid == oid).headOption match {
+      case Some(orgRoles) =>
+        rids.foreach(rid => assertResult(true)(orgRoles.roles.exists(role => role.rid == rid)))
+      case res => assertResult(true)(res)
+    }
+  }
+
+  private[this] def userAddGroup(oid: OrganizationId, uid: UserId, gids: Vector[GroupId]) = {
+    val req = UserAddGroupsRequest(oid, uid, gids)
+    server.httpPostJson[UserAddGroupsResponse](
+      path = USER_ADD_GROUPS_V1_API,
+      headers = Map("oid" -> orgId.value.toString, "uid" -> uid.value.toString),
+      postBody = mapper.writeValueAsString(req),
+      andExpect = Ok
+    )
+  }
+
+  private[this] def userRemoveGroup(oid: OrganizationId, uid: UserId, gids: Vector[GroupId]) = {
+    val req = UserRemoveGroupsRequest(oid, uid, gids)
+    server.httpDeleteJson[UserRemoveGroupsResponse](
+      path = USER_REMOVE_GROUPS_V1_API,
+      headers = Map("oid" -> orgId.value.toString, "uid" -> uid.value.toString),
+      deleteBody = mapper.writeValueAsString(req),
+      andExpect = Ok
+    )
+  }
+
+  private[this] def userGetGroup(oid: OrganizationId, uid: UserId, gids: Vector[GroupId]) = {
+    val resp = server.httpGetJson[UserGetGroupsResponse](
+      path = s"${USER_GET_GROUPS_V1_API}?oid=${orgId.value.toString}&uid=${uid.value.toString}",
+      andExpect = Ok
+    )
+
+    gids.foreach(gid => assertResult(true)(resp.groups.exists(g => g.group.gid == gid)))
+  }
+
+  val orgId = OrganizationId(UUID.randomUUID())
+  val uid   = UserId(UUID.randomUUID())
+
+  test("Upsert user role, group and get permisssion, Return OK") {
+    val permissions = createPermission(Vector(Name("p1"), Name("p2")))
+    val headPermission = permissions.headOption match {
+      case Some(p) => Vector(p)
+      case _       => Vector()
+    }
+    val lastPermission = permissions.lastOption match {
+      case Some(p) => Vector(p)
+      case _       => Vector()
+    }
+    val roleRequest1 = RoleRequest(Key(UUID.randomUUID().toString), Name("admin"), None)
+    val roleRequest2 = RoleRequest(Key(UUID.randomUUID().toString), Name("user"), None)
+    val roles        = createRole(Vector(roleRequest1, roleRequest2))
+    val headRole = roles.headOption match {
+      case Some(r) => Vector(r)
+      case _       => Vector()
+    }
+    val lastRole = roles.lastOption match {
+      case Some(r) => Vector(r)
+      case _       => Vector()
+    }
+    val group1 = createGroup(Name("my group1"), None)
+    val group2 = createGroup(Name("my group2"), None)
+    headRole.map(r => roleAddPermission(r.rid, headPermission.map { _.pid }))
+    lastRole.map(r => roleAddPermission(r.rid, lastPermission.map { _.pid }))
+    groupAddRole(group1.gid, headRole.map(_.rid))
+    groupAddRole(group2.gid, lastRole.map(_.rid))
+
+    // check upsert role id
+    upsertRoleUser(headRole.map(_.rid))
+    checkPermission(headPermission)
+    checkUserHavePermission(headPermission.map(_.key), headPermission.map(_.key))
+    checkUserHavePermission(lastPermission.map(_.key), Vector())
+    checkOrganization(headPermission)
+
+    // check upsert group id
+    upsertGroupUser(Vector(group1.gid))
+    checkPermission(headPermission)
+    checkUserHavePermission(headPermission.map(_.key), headPermission.map(_.key))
+    checkUserHavePermission(lastPermission.map(_.key), Vector())
+    checkUser(headRole.map(r => RoleBase(r.rid, r.key)), Vector(group1.gid))
+
+    // check delete
+    removeUser()
+    checkEmptyOrganization()
+
+    // check upsert by role key
+    removeUser()
+    upsertRoleUserByKey(headRole.map(_.key))
+    checkUser(headRole.map(r => RoleBase(r.rid, r.key)), Vector())
+
+    // check upsert role and group (with different role)
+    removeUser()
+    upsertRoleUser(headRole.map(_.rid))
+    upsertGroupUser(Vector(group2.gid))
+    checkPermission(permissions)
+    checkUserHavePermission(headPermission.map(_.key), headPermission.map(_.key))
+    checkUserHavePermission(lastPermission.map(_.key), lastPermission.map(_.key))
+    checkUserHavePermission(permissions.map(_.key), permissions.map(_.key))
+
+    // check only upsert group id
+    removeUser()
+    upsertGroupUser(Vector(group1.gid))
+    checkPermission(headPermission)
+    checkUser(Vector(), Vector(group1.gid))
+  }
+
+  test("Upsert user empty role id or key. Return 400") {
+    val roleReq1 = ReplaceUserRolesRequest(orgId, uid, Vector())
+    server.httpPut(
+      path = REPLACE_USER_ROLE_V1_API,
+      headers = Map("oid" -> orgId.value.toString, "uid" -> uid.value.toString),
+      putBody = mapper.writeValueAsString(roleReq1),
+      andExpect = BadRequest,
+      withJsonBody = mapper.writeValueAsString(RepoRoleEmptyIdError)
+    )
+
+    val roleReq2 = ReplaceUserRolesByKeyRequest(orgId, uid, Vector())
+    server.httpPut(
+      path = REPLACE_USER_ROLE_BY_KEY_V1_API,
+      headers = Map("oid" -> orgId.value.toString, "uid" -> uid.value.toString),
+      putBody = mapper.writeValueAsString(roleReq2),
+      andExpect = BadRequest,
+      withJsonBody = mapper.writeValueAsString(RepoRoleEmptyIdError)
+    )
+  }
+
+  test("Upsert user role id or group id not found. Return 400") {
+    val roleReq = ReplaceUserRolesRequest(orgId, uid, Vector(RoleId(UUID.randomUUID())))
+    server.httpPut(
+      path = REPLACE_USER_ROLE_V1_API,
+      headers = Map("oid" -> orgId.value.toString, "uid" -> uid.value.toString),
+      putBody = mapper.writeValueAsString(roleReq),
+      andExpect = BadRequest,
+      withJsonBody = mapper.writeValueAsString(RepoRoleIdNotFoundError)
+    )
+
+    val groupReq = ReplaceUserGroupsRequest(orgId, uid, Vector(GroupId(UUID.randomUUID())))
+    server.httpPut(
+      path = REPLACE_USER_GROUP_V1_API,
+      headers = Map("oid" -> orgId.value.toString, "uid" -> uid.value.toString),
+      putBody = mapper.writeValueAsString(groupReq),
+      andExpect = BadRequest,
+      withJsonBody = mapper.writeValueAsString(RepoGroupIdNotFoundError)
+    )
+
+    val roleReqByKey = ReplaceUserRolesByKeyRequest(orgId, uid, Vector(Key(UUID.randomUUID().toString)))
+    server.httpPut(
+      path = REPLACE_USER_ROLE_BY_KEY_V1_API,
+      headers = Map("oid" -> orgId.value.toString, "uid" -> uid.value.toString),
+      putBody = mapper.writeValueAsString(roleReqByKey),
+      andExpect = BadRequest,
+      withJsonBody = mapper.writeValueAsString(RepoRoleKeyNotFoundError)
+    )
+  }
+
+  test("Delete group will delete organization_group_user too") {
+    removeUser()
+
+    val group = createGroup(Name("my group1"), None)
+    upsertGroupUser(Vector(group.gid))
+    checkUser(Vector(), Vector(group.gid))
+
+    // delete group
+    server.httpDelete(
+      path = DELETE_GROUP_V1_API,
+      headers = Map("oid" -> group.oid.value.toString, "gid" -> group.gid.value.toString),
+      andExpect = Ok
+    )
+
+    checkEmptyUser()
+  }
+
+  test("Delete role will delete organization_role_user too") {
+    removeUser()
+
+    val roleRequest = RoleRequest(Key(UUID.randomUUID().toString), Name("user"), None)
+    val roles       = createRole(Vector(roleRequest))
+    val rid         = roles.headOption.map { _.rid }.getOrElse(RoleId(UUID.randomUUID()))
+    upsertRoleUser(Vector(rid))
+
+    server.httpDelete(
+      path = DELETE_ROLE_V1_API,
+      headers = Map("rid" -> rid.value.toString),
+      andExpect = Ok
+    )
+
+    checkEmptyUser()
+  }
+
+  test("assign user to the role, and the role without permission, should response organization without permission") {
+    removeUser()
+    val roleRequest1 = RoleRequest(Key(UUID.randomUUID().toString), Name("admin"), None)
+    val roles        = createRole(Vector(roleRequest1))
+
+    checkPermission(Vector())
+    upsertRoleUser(roles.map(_.rid))
+    checkOrganization(Vector())
+  }
+  test("assign user to the group, and the group without role, should response organization without permission") {
+    removeUser()
+    val roleRequest = RoleRequest(Key(UUID.randomUUID().toString), Name("user"), None)
+    val roles       = createRole(Vector(roleRequest))
+    val rid         = roles.headOption.map { _.rid }.getOrElse(RoleId(UUID.randomUUID()))
+    val group       = createGroup(Name("my group1"), None)
+
+    checkPermission(Vector())
+    upsertGroupUser(Vector(group.gid))
+    checkOrganization(Vector())
+  }
+
+  test("user add/remove groups, Return 200") {
+    val group1 = createGroup(Name("my group1"), None)
+    val group2 = createGroup(Name("my group2"), None)
+
+    userAddGroup(orgId, uid, Vector(group1.gid, group2.gid))
+    userGetGroup(orgId, uid, Vector(group1.gid, group2.gid))
+    userRemoveGroup(orgId, uid, Vector(group1.gid))
+    userGetGroup(orgId, uid, Vector(group2.gid))
+  }
+
+  test("user add/remove groups not in organization, Return 400") {
+    val group = createGroup(Name("my group"), None)
+
+    val oid = OrganizationId(UUID.randomUUID())
+    val req = UserAddGroupsRequest(oid, uid, Vector(group.gid))
+    server.httpPost(
+      path = USER_ADD_GROUPS_V1_API,
+      headers = Map("oid" -> oid.value.toString, "uid" -> uid.value.toString),
+      postBody = mapper.writeValueAsString(req),
+      andExpect = BadRequest,
+      withJsonBody = mapper.writeValueAsString(RepoGroupIdNotFoundError)
+    )
+
+    val req2 = UserRemoveGroupsRequest(oid, uid, Vector(group.gid))
+    server.httpDelete(
+      path = USER_REMOVE_GROUPS_V1_API,
+      headers = Map("oid" -> oid.value.toString, "uid" -> uid.value.toString),
+      deleteBody = mapper.writeValueAsString(req2),
+      andExpect = BadRequest,
+      withJsonBody = mapper.writeValueAsString(RepoGroupIdNotFoundError)
+    )
+  }
+
+  test("user add duplicate user, Return 409") {
+    val group = createGroup(Name("my group"), None)
+    userAddGroup(orgId, uid, Vector(group.gid))
+    val req = UserAddGroupsRequest(orgId, uid, Vector(group.gid))
+    server.httpPost(
+      path = USER_ADD_GROUPS_V1_API,
+      headers = Map("oid" -> orgId.value.toString, "uid" -> uid.value.toString),
+      postBody = mapper.writeValueAsString(req),
+      andExpect = Conflict,
+      withJsonBody = mapper.writeValueAsString(RepoOrganizationGroupUserDuplicateError)
+    )
+  }
+
+  test("remove organization, Return 200") {
+    server.httpDelete(
+      path = REMOVE_ORGANIZATION_RELATIONSHIPS_V1_API,
+      headers = Map("oid" -> orgId.value.toString),
+      andExpect = Ok
+    )
+  }
+}
