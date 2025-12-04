@@ -1,0 +1,280 @@
+class GroupControllerFeatureTest extends ControllerFeatureTest {
+  def createGroup(): Group = {
+    val oid    = OrganizationId(UUID.randomUUID())
+    val name   = Name("my group")
+    val remark = Remark("group desc")
+    server.httpPostJson[Group](
+      path = CREATE_GROUP_V1_API,
+      headers = Map("oid" -> oid.value.toString),
+      postBody = mapper.writeValueAsString(CreateGroupRequest(oid, name, Some(remark))),
+      andExpect = Ok
+    )
+  }
+
+  private[this] def groupAddUser(group: Group, uids: Vector[UserId]) = {
+    val req = GroupAddUsersRequest(group.oid, group.gid, uids)
+    server.httpPostJson[GroupAddUsersResponse](
+      path = GROUP_ADD_USERS_V1_API,
+      headers = Map("oid" -> group.oid.value.toString),
+      postBody = mapper.writeValueAsString(req),
+      andExpect = Ok
+    )
+  }
+
+  private[this] def groupRemoveUser(group: Group, uids: Vector[UserId]) = {
+    val req = GroupRemoveUsersRequest(group.oid, group.gid, uids)
+    server.httpDeleteJson[GroupRemoveUsersResponse](
+      path = GROUP_REMOVE_USERS_V1_API,
+      headers = Map("oid" -> group.oid.value.toString),
+      deleteBody = mapper.writeValueAsString(req),
+      andExpect = Ok
+    )
+  }
+
+  private[this] def groupGetUser(group: Group, uids: Vector[UserId]) = {
+    val resp = server.httpGetJson[GroupGetUsersResponse](
+      path = s"${GROUP_GET_USERS_V1_API}?oid=${group.oid.value.toString}&gid=${group.gid.value.toString}",
+      andExpect = Ok
+    )
+
+    uids.foreach(uid => assertResult(true)(resp.users.exists(user => user.uid == uid)))
+  }
+
+  def createRole(): CreateRoleResponse = {
+    val role = RoleRequest(Key(UUID.randomUUID().toString), Name("Administrator"), Some(Remark("is admin")))
+
+    server.httpPostJson[CreateRoleResponse](
+      path = CREATE_ROLE_V1_API,
+      postBody = mapper.writeValueAsString(CreateRoleRequest(Vector(role))),
+      andExpect = Ok
+    )
+  }
+
+  test("Group CRUD. Return OK") {
+    // create role
+    val group = createGroup()
+
+    // get group
+    val getResp = GetGroupResponse(Vector(GroupResponse(group.gid, group.name, Vector(), group.remark)))
+    server.httpGet(
+      path = s"${GET_GROUP_V1_API}?oid=${group.oid.value.toString}",
+      andExpect = Ok,
+      withJsonBody = mapper.writeValueAsString(getResp)
+    )
+
+    // update group
+    val nameV2   = Name("my group V2")
+    val remarkV2 = Remark("group desc V2")
+    server.httpPut(
+      path = UPDATE_GROUP_V1_API,
+      putBody = mapper.writeValueAsString(UpdateGroupRequest(group.oid, group.gid, nameV2, Some(remarkV2))),
+      headers = Map("oid" -> group.oid.value.toString),
+      andExpect = Ok,
+      withJsonBody = mapper.writeValueAsString(UpdateGroupResponse(group.gid, nameV2, Some(remarkV2)))
+    )
+
+    // delete group
+    server.httpDelete(
+      path = DELETE_GROUP_V1_API,
+      headers = Map("oid" -> group.oid.value.toString, "gid" -> group.gid.value.toString),
+      andExpect = Ok
+    )
+
+    // check delete result
+    server.httpGet(
+      path = s"${GET_GROUP_V1_API}?oid=${group.oid.value.toString}",
+      andExpect = Ok,
+      withJsonBody = mapper.writeValueAsString(GetGroupResponse(Vector()))
+    )
+  }
+
+  test("Group update id not found. Return 400") {
+    val gid  = GroupId(UUID.randomUUID())
+    val oid  = OrganizationId(UUID.randomUUID())
+    val name = Name("my group")
+    val req  = UpdateGroupRequest(oid, gid, name, None)
+    server.httpPut(
+      path = UPDATE_GROUP_V1_API,
+      headers = Map("oid" -> oid.value.toString),
+      putBody = mapper.writeValueAsString(req),
+      andExpect = BadRequest,
+      withJsonBody = mapper.writeValueAsString(RepoGroupIdNotFoundError)
+    )
+  }
+  test("Group delete id not found. Return 400") {
+    server.httpDelete(
+      path = DELETE_GROUP_V1_API,
+      headers = Map("oid" -> UUID.randomUUID().toString, "gid" -> UUID.randomUUID().toString),
+      andExpect = BadRequest,
+      withJsonBody = mapper.writeValueAsString(RepoGroupIdNotFoundError)
+    )
+  }
+  test("Group add and delete role. Return OK") {
+    val group = createGroup()
+    val roles = createRole().roles.headOption match {
+      case Some(role) => Vector(role)
+      case _          => Vector()
+    }
+
+    server.httpPost(
+      path = ADD_GROUP_ROLE_V1_API,
+      headers = Map("oid" -> group.oid.value.toString),
+      postBody = mapper.writeValueAsString(AddGroupRoleRequest(group.oid, group.gid, roles.map(_.rid))),
+      andExpect = Ok,
+      withJsonBody = mapper.writeValueAsString(AddGroupRoleResponse(group.gid, roles.map(_.rid)))
+    )
+
+    server.httpDelete(
+      path = DELETE_GROUP_ROLE_V1_API,
+      headers = Map("oid" -> group.oid.value.toString),
+      deleteBody = mapper.writeValueAsString(DeleteGroupRoleRequest(group.oid, group.gid, roles.map(_.rid))),
+      andExpect = Ok,
+      withJsonBody = mapper.writeValueAsString(DeleteGroupRoleResponse(group.gid, Vector()))
+    )
+  }
+  test("Group add or delete role but gid not found. Return 400") {
+    val gid = GroupId(UUID.randomUUID())
+    val oid = OrganizationId(UUID.randomUUID())
+    server.httpPost(
+      path = DELETE_GROUP_ROLE_V1_API,
+      headers = Map("oid" -> oid.value.toString),
+      postBody = mapper.writeValueAsString(AddGroupRoleRequest(oid, gid, Vector())),
+      andExpect = BadRequest,
+      withJsonBody = mapper.writeValueAsString(RepoGroupIdNotFoundError)
+    )
+
+    server.httpDelete(
+      path = DELETE_GROUP_ROLE_V1_API,
+      headers = Map("oid" -> oid.value.toString),
+      deleteBody = mapper.writeValueAsString(DeleteGroupRoleRequest(oid, gid, Vector())),
+      andExpect = BadRequest,
+      withJsonBody = mapper.writeValueAsString(RepoGroupIdNotFoundError)
+    )
+  }
+  test("Group add role but rid not found. Return 400") {
+    val group = createGroup()
+    val rid   = RoleId(UUID.randomUUID())
+    server.httpPost(
+      path = DELETE_GROUP_ROLE_V1_API,
+      headers = Map("oid" -> group.oid.value.toString),
+      postBody = mapper.writeValueAsString(AddGroupRoleRequest(group.oid, group.gid, Vector(rid))),
+      andExpect = BadRequest,
+      withJsonBody = mapper.writeValueAsString(RepoRoleIdNotFoundError)
+    )
+
+    server.httpDelete(
+      path = DELETE_GROUP_ROLE_V1_API,
+      headers = Map("oid" -> group.oid.value.toString),
+      deleteBody = mapper.writeValueAsString(DeleteGroupRoleRequest(group.oid, group.gid, Vector(rid))),
+      andExpect = BadRequest,
+      withJsonBody = mapper.writeValueAsString(RepoRoleIdNotFoundError)
+    )
+  }
+
+  test("Group add duplicate rid. Return 409") {
+    val group = createGroup()
+    val roles = createRole().roles.headOption match {
+      case Some(role) => Vector(role)
+      case _          => Vector()
+    }
+
+    server.httpPost(
+      path = ADD_GROUP_ROLE_V1_API,
+      headers = Map("oid" -> group.oid.value.toString),
+      postBody = mapper.writeValueAsString(AddGroupRoleRequest(group.oid, group.gid, roles.map(_.rid))),
+      andExpect = Ok,
+      withJsonBody = mapper.writeValueAsString(AddGroupRoleResponse(group.gid, roles.map(_.rid)))
+    )
+
+    server.httpPost(
+      path = ADD_GROUP_ROLE_V1_API,
+      headers = Map("oid" -> group.oid.value.toString),
+      postBody = mapper.writeValueAsString(AddGroupRoleRequest(group.oid, group.gid, roles.map(_.rid))),
+      andExpect = Conflict,
+      withJsonBody = mapper.writeValueAsString(RepoGroupRoleInsertDuplicateError)
+    )
+  }
+
+  test("Delete role will delete group_role too") {
+    val group = createGroup()
+    val roles = createRole().roles.headOption match {
+      case Some(role) => Vector(role)
+      case _          => Vector()
+    }
+
+    server.httpPost(
+      path = ADD_GROUP_ROLE_V1_API,
+      headers = Map("oid" -> group.oid.value.toString),
+      postBody = mapper.writeValueAsString(AddGroupRoleRequest(group.oid, group.gid, roles.map(_.rid))),
+      andExpect = Ok,
+      withJsonBody = mapper.writeValueAsString(AddGroupRoleResponse(group.gid, roles.map(_.rid)))
+    )
+
+    // delete role
+    val rid = roles.headOption.map { _.rid.value.toString }.getOrElse(UUID.randomUUID().toString)
+    server.httpDelete(
+      path = DELETE_ROLE_V1_API,
+      headers = Map("rid" -> rid),
+      andExpect = Ok
+    )
+
+    // get group
+    val getResp = GetGroupResponse(Vector(GroupResponse(group.gid, group.name, Vector(), group.remark)))
+    server.httpGet(
+      path = s"${GET_GROUP_V1_API}?oid=${group.oid.value.toString}",
+      andExpect = Ok,
+      withJsonBody = mapper.writeValueAsString(getResp)
+    )
+  }
+
+  test("group add/remove user, Return 200") {
+    val group = createGroup()
+    val uid1  = UserId(UUID.randomUUID())
+    val uid2  = UserId(UUID.randomUUID())
+
+    groupAddUser(group, Vector(uid1, uid2))
+    groupGetUser(group, Vector(uid1, uid2))
+    groupRemoveUser(group, Vector(uid2))
+    groupGetUser(group, Vector(uid1))
+  }
+
+  test("group add/remove user not in organization, Return 400") {
+    val group1 = createGroup()
+    val group2 = createGroup()
+    val uid    = UserId(UUID.randomUUID())
+
+    val req = GroupAddUsersRequest(group1.oid, group2.gid, Vector(uid))
+    server.httpPost(
+      path = GROUP_ADD_USERS_V1_API,
+      headers = Map("oid" -> group1.oid.value.toString),
+      postBody = mapper.writeValueAsString(req),
+      andExpect = BadRequest,
+      withJsonBody = mapper.writeValueAsString(RepoGroupIdNotFoundError)
+    )
+
+    val req2 = GroupRemoveUsersRequest(group2.oid, group1.gid, Vector(uid))
+    server.httpDelete(
+      path = GROUP_REMOVE_USERS_V1_API,
+      headers = Map("oid" -> group2.oid.value.toString),
+      deleteBody = mapper.writeValueAsString(req2),
+      andExpect = BadRequest,
+      withJsonBody = mapper.writeValueAsString(RepoGroupIdNotFoundError)
+    )
+  }
+
+  test("group add duplicate user, Return 409") {
+    val group = createGroup()
+    val uid   = UserId(UUID.randomUUID())
+
+    groupAddUser(group, Vector(uid))
+
+    val req = GroupAddUsersRequest(group.oid, group.gid, Vector(uid))
+    server.httpPost(
+      path = GROUP_ADD_USERS_V1_API,
+      headers = Map("oid" -> group.oid.value.toString),
+      postBody = mapper.writeValueAsString(req),
+      andExpect = Conflict,
+      withJsonBody = mapper.writeValueAsString(RepoOrganizationGroupUserDuplicateError)
+    )
+  }
+}
