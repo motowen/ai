@@ -1,0 +1,137 @@
+RBAC 使用指南 (RBAC Usage Guide)
+本專案使用基於角色的存取控制 (RBAC) 來管理權限。以下是系統的核心概念與操作流程。
+
+1. 核心概念 (Core Concepts)
+系統主要由以下幾個實體組成：
+
+Permission (權限): 最基本的授權單位 (例如：read, write, execute)。權限是全域定義的。
+Role (角色): 一組權限的集合 (例如：admin, editor, viewer)。角色也是全域定義的。
+Organization (組織): 用戶與角色的關聯是發生在特定的「組織」之下。
+User (用戶): 用戶在不同的組織中可以擁有不同的角色。
+2. 操作流程 (Workflows)
+權限管理的操作順序通常如下：
+
+建立權限 (Create Permission): 定義系統中可用的權限。
+建立角色 (Create Role): 定義系統中的角色。
+綁定權限至角色 (Assign Permissions to Role): 設定該角色擁有那些權限。
+指派用戶角色 (Assign Role to User): 在特定組織下，賦予用戶某個角色。
+3. 詳細 API 操作說明
+以下是主要 API 的使用方式 (參考 RoleController 與 PermissionController)：
+
+3.1 建立權限 (Create Permission)
+API: POST /v1/permission
+用途: 建立一個新的權限。
+範例 Payload:
+{
+  "permissions": [
+    {
+      "key": "article_view",
+      "name": "View Article"
+    }
+  ]
+}
+3.2 建立角色 (Create Role)
+API: POST /v1/role
+用途: 建立一個新的角色。
+範例 Payload:
+{
+  "roles": [
+    {
+      "key": "editor",
+      "name": "Editor",
+      "remark": "Can edit articles"
+    }
+  ]
+}
+3.3 綁定權限至角色 (Assign Permissions to Role)
+建議使用 Key 進行綁定，可讀性較高。
+
+API: POST /v1/role/add_permission_by_key
+用途: 將一組權限 (Permisison Keys) 賦予給特定角色 (Role Key)。
+範例 Payload:
+{
+  "rkey": "editor",
+  "pkeys": ["article_view", "article_edit"]
+}
+3.4 指派用戶角色 (Assign Role to User)
+這是將用戶加入授權體系的最後一步。注意：這是在 特定組織 (Organization) 下進行的。
+
+API: POST /v1/role/add_user_by_key
+用途: 在指定組織 (oid) 中，將用戶 (uids) 指派為特定角色 (rkey)。
+範例 Payload:
+{
+  "oid": "org-12345",
+  "rkey": "editor",
+  "uids": ["user-001", "user-002"]
+}
+3.5 建立群組 (Create Group)
+API: POST /v1/group
+用途: 在特定組織下建立一個新的群組。
+範例 Payload:
+{
+  "oid": "org-12345",
+  "name": "Engineering",
+  "remark": "All engineers"
+}
+3.6 綁定角色至群組 (Assign Role to Group)
+API: POST /v1/group/role
+用途: 將角色 (Role IDs) 賦予給特定群組 (Group ID)。
+範例 Payload:
+{
+  "oid": "org-12345",
+  "gid": "group-uuid-123",
+  "rids": ["role-uuid-456", "role-uuid-789"]
+}
+3.7 加入用戶至群組 (Add User to Group)
+API: POST /v1/group/user
+用途: 將用戶 (User IDs) 加入到特定群組 (Group ID)。
+範例 Payload:
+{
+  "oid": "org-12345",
+  "gid": "group-uuid-123",
+  "uids": ["user-001", "user-002"]
+}
+4. 權限驗證 (Verify Permission)
+系統提供 OrganizationService.checkPermission 方法來驗證權限。
+
+API: (假設對應的 Controller 是 POST /v1/organization/check_permission)
+參數:
+oid: 組織 ID
+uid: 用戶 ID
+pkeys: 欲檢查的權限 Key 列表
+邏輯:
+找出該用戶在該組織下，透過「角色」獲得的權限。
+找出該用戶在該組織下，透過「群組」獲得的權限 (Group 也有 Role)。
+合併兩者，並與傳入的 pkeys 比對，回傳用戶實際擁有的權限。
+5. 常見問題 (FAQ)
+Q1: User 是否一定要設定 Org?
+是。在 RBAC 系統中，權限、角色指派以及群組歸屬都是依附於特定的 Organization。
+
+驗證權限時 (checkPermission) 必須提供 oid。
+同一位用戶在不同的 Organization 可以擁有不同的角色與權限。
+Q2: Org 跟 Group 的關係是什麼?
+一對多關係: 一個 Organization 可以擁有多個 Group。
+從屬關係: Group 是建立在 Organization 之下的 (Group table 有 oid 欄位)。
+授權方式:
+User 可以被加入 Group。
+Group 可以被賦予 Role。
+User 會繼承所屬 Group 的所有權限。 (即：User Permissions = User Roles Permissions + User Groups Roles Permissions)
+Q3: Group 的 RBAC 是用在什麼情境之下? (When to use Group?)
+Group (群組) 主要用於 簡化大量用戶的權限管理。
+
+情境 1：部門/職能管理
+
+例如建立一個 "Engineering" Group。
+將 "Developer" Role (包含 git-read, git-write 權限) 賦予給 "Engineering" Group。
+當新進工程師報到時，只需將他加入 "Engineering" Group，他即自動擁有開發所需的所有權限。
+若不使用 Group，則需針對每位新進人員逐一綁定 Role。
+情境 2：專案小組
+
+例如建立 "Project A Team" Group。
+賦予該 Group 針對 Project A 的特定權限。
+專案成員變動頻繁時，只需維護 Group 成員名單，無需逐一調整每位成員的 Role。
+總結：
+
+Role 定義「能做什麼」(權限集合)。
+Group 定義「是誰」(用戶集合)。
+透過將 Role 賦予給 Group，可以實現高效率的批量授權。
