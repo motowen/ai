@@ -1,0 +1,46 @@
+flowchart TD
+    REQ[CheckPermission Request]
+
+    REG[Permission Registry: action → scope & rules]
+
+    DEC[Decision Engine]
+
+    SYS[System Role Evaluation<br/>user/org ↔ role]
+    RES[Resource Role Evaluation<br/>user/org ↔ resource_id ↔ role]
+   
+
+    ALLOW[Allow]
+    DENY[Deny]
+
+    REQ --> REG --> DEC
+
+    DEC --> SYS
+    DEC --> RES
+
+    SYS --> DEC
+    RES --> DEC
+
+    DEC --> ALLOW
+    DEC --> DENY
+
+flowchart TD
+    A[CheckPermission]
+    B{Hard Deny?<br/>}
+    C{System Scoped Action?}
+    D{System Role Allows? user/org ↔ role}
+    E{Resource Role Allows? user/org ↔ resource_id ↔ role}
+
+    AL[Allow]
+    DN[Deny]
+
+    A --> B
+    B -->|Yes| DN
+    B -->|No| C
+
+    C -->|Yes| D
+    D -->|Yes| AL
+    D -->|No| DN
+
+    C -->|No| E
+    E -->|Yes| AL
+
