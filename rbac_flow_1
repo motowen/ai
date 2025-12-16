@@ -1,0 +1,200 @@
+1. user get system list
+QUERY systems (QUERY GraphQL)
+GET api/v1/user_roles/me?scope=system (permission: platform.system.read)
+
+sequenceDiagram
+autonumber
+actor FE as Platform FE
+participant SYS as System BE
+participant RBAC as RBAC BE
+
+FE->>SYS: GET systems (GraphQL)
+SYS->>RBAC: GET api/v1/user_roles/me?scope=system (permission: platform.system.read)
+RBAC-->>RBAC: check permission
+RBAC-->>RBAC: query the scope of the system from user_roles DB
+RBAC-->>SYS: 200 [users[namespace]]
+
+SYS-->>SYS: query all systems from System DB
+SYS-->>FE: 200 [systems...]
+
+2. Moderator create system
+Create System (Mutation GraphQL)
+POST api/v1/permissions/check (permission: platform.system.create)
+POST api/v1/user_roles/owner (permission: platform.system.add_onwer)
+
+sequenceDiagram
+autonumber
+actor FE as Platform FE
+participant SYS as System BE
+participant RBAC as RBAC BE
+
+FE->>SYS: Create System (GraphQL)
+SYS->>RBAC: POST api/v1/permissions/check (permission: platform.system.create)
+RBAC-->>SYS: 200 (allow=true)
+SYS->>RBAC: POST api/v1/user_roles/owner (permission: platform.system.add_onwer)
+RBAC-->>SYS: 200
+SYS-->>SYS: write system metadata (System DB)
+
+SYS-->>FE: 201 {system metadata}
+
+3. system user assign(remove/change) admin / dev user / viewer 
+FE->>RBAC: POST api/v1/user_roles (permission: platform.system.add_role)
+
+sequenceDiagram
+autonumber
+actor FE as Platform FE
+participant RBAC as RBAC BE
+
+FE->>RBAC: POST api/v1/user_roles (permission: platform.system.add_role)
+RBAC-->>RBAC: write user role (system user_roles DB)
+RBAC-->>FE: 200
+
+4. system user update system (delete system)
+Update System (Mutation GraphQL)
+POST api/v1/permissions/check (permission: platform.system.update)
+
+sequenceDiagram
+autonumber
+actor FE as Platform FE
+participant SYS as System BE
+participant RBAC as RBAC BE
+
+FE->>SYS: Update System (Mutation GraphQL)
+SYS->>RBAC: POST api/v1/permissions/check (permission: platform.system.update)
+RBAC-->>SYS: 200 (allow=true)
+
+SYS-->>SYS: update system metadata in System DB
+SYS-->>FE: 200
+
+5. system user change owner
+POST api/v1/user_roles/owner (permission: platform.system.add_onwer)
+
+sequenceDiagram
+autonumber
+actor FE as Platform FE
+participant RBAC as RBAC BE
+
+FE->>RBAC: POST api/v1/user_roles/owner (permission: platform.system.add_onwer)
+RBAC-->>RBAC: check permission
+RBAC-->>RBAC: add new owner
+RBAC-->>RBAC: change original owner to admin
+RBAC-->>FE: 200
+
+6. system user get system user list by namespace
+
+sequenceDiagram
+autonumber
+actor FE as Platform FE
+participant RBAC as RBAC BE
+
+FE->>RBAC: GET api/v1/user_roles?scope=system&namespace=xxx (permission: platform.system.add_role)
+RBAC-->>RBAC: check permission
+RBAC-->>RBAC: query the scope of the system and the namespace from user_roles DB
+RBAC-->>FE: 200
+
+7. Datasource (Widget) CRUD 
+CRUD DataSource (Mutation GraphQL)
+POST api/v1/permissions/check (permission: system.resource.create)
+
+sequenceDiagram
+autonumber
+actor FE as Platform FE
+participant DS as Datasource BE
+participant RBAC as RBAC BE
+
+FE->>DS: CRUD DataSource (Mutation GraphQL)
+DS->>RBAC: POST api/v1/permissions/check (permission: system.resource.create)
+RBAC-->>DS: 200 (allow=true)
+
+DS-->>FE: 201 {datasource_id}
+
+8. Publish app
+Publish APP (Mutation GraphQL)
+POST api/v1/permissions/check (permission: system.resource.publish)
+POST api/v1/user_roles/resources/owner (permission: resource.app.add_role)
+
+sequenceDiagram
+autonumber
+actor FE as Platform FE
+participant APP as App BE
+participant RBAC as RBAC BE
+
+FE->>APP: Publish APP (Mutation GraphQL)
+APP->>RBAC: POST api/v1/permissions/check (permission: system.resource.publish)
+RBAC-->>APP: 200 (allow=true)
+APP->>RBAC: POST api/v1/user_roles/resources/owner (permission: resource.app.add_role)
+RBAC-->>APP: 200
+APP-->>APP: write app metadata (APP DB)
+APP-->>FE: 201
+
+9. Set app viewer
+POST api/v1/user_roles (permission: resource.app.add_role)
+
+sequenceDiagram
+autonumber
+actor FE as Platform FE
+participant RBAC as RBAC BE
+
+FE->>RBAC: POST api/v1/user_roles (permission: resource.app.add_role)
+RBAC-->>RBAC: check permission
+RBAC-->>RBAC: write user role (resource user_roles DB)
+RBAC-->>FE: 200
+
+10. Select app from app market
+QUERY APPs (QUERY GraphQL)
+GET api/v1/user_roles/me?scope=resource&resource_type=app (permission: resource.app.read)
+
+sequenceDiagram
+autonumber
+actor FE as Platform FE
+participant APP as App BE
+participant RBAC as RBAC BE
+
+FE->>APP: QUERY APPs (QUERY GraphQL)
+APP->>RBAC: GET api/v1/user_roles/me?scope=resource&resource_type=app (permission: resource.app.read)
+RBAC-->>RBAC: check permission
+RBAC-->>RBAC: query the scope of the resource from user_roles DB
+RBAC-->>APP: 200 [users[app]]
+APP-->>APP: query the apps from APP DB
+APP-->>FE: 200 [apps...]
+
+11. get dashboard
+QUERY dashboard (QUERY GraphQL)
+GET api/v1/user_roles/me?scope=resource&resource_type=dashboard (permission: resource.dashboard.read)
+
+sequenceDiagram
+autonumber
+actor FE as Platform FE
+participant DASH as Dashboard BE
+participant RBAC as RBAC BE
+
+FE->>DASH: QUERY dashboard (QUERY GraphQL)
+DASH->>RBAC: GET api/v1/user_roles/me?scope=resource&resource_type=dashboard (permission: resource.dashboard.read)
+RBAC-->>RBAC: check permission
+RBAC-->>RBAC: query the scope of the resource from user_roles DB
+RBAC-->>DASH: 200 [users[dashboard]]
+DASH-->>DASH: query the dashboard from dashboard DB
+DASH-->>FE: 200 {dashboard...}
+
+12. Create dashboard
+Create dashboard (Mutation GraphQL)
+POST api/v1/user_roles/resources/owner (permission: na, resource_type=dashboard)
+
+sequenceDiagram
+autonumber
+actor FE as Platform FE
+participant DASH as Dashboard BE
+participant RBAC as RBAC BE
+
+FE->>DASH: Create dashboard (Mutation GraphQL)
+DASH->>RBAC: POST api/v1/user_roles/resources/owner (permission: na, resource_type=dashboard)
+RBAC-->>DASH: 200
+DASH-->>DASH: write dashboard metadata (dashboard DB)
+DASH-->>FE: 201
+
+13. Dashboard role assign
+
+14. Dashboard owner transfer
+
+15. Dashboard update (delete)
+
