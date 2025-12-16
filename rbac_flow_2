@@ -1,0 +1,117 @@
+moderator / owner / admin / dev user / viewer 
+create / read / update / transfre owner / add members / remove members 
+
+platform.system.create 
+platform.system.read
+platform.system.update
+platform.system.add_role
+platform.system.add_owner
+system.resource.create 
+system.resource.read 
+system.resource.delete
+system.resource.update
+system.resource.publish
+
+resource.dashboard.read
+resource.dashboard.update
+resource.dashboard.delete
+resource.dashboard.add_owner
+resource.dashboard.add_role
+
+resource.app.read
+resource.app.update
+resource.app.delete
+resource.app.add_owner
+resource.app.add_role
+
+有下面的micro service
+Platform FE / System BE / RBAC BE / Widget , Datasource , App , DashBoard BE 
+預設會有一個moderator有platform.system.create 
+幫我想下面的stroy哪些service會有哪些api, 並幫我畫出sequence diagram
+1. moderator create一個system
+2. moderator get all system
+3. system owner get his system (by the system name, 一個人可以屬於多個system)
+4. system owner assign admin
+5. system owner/admin update system
+6. system owner change owner
+7. system owner/admin create datasource
+8. system owner/admin get all datasource (by the system name, 一個人可以屬於多個system)
+9. system owner/admin update datasource
+10. system owner/admin delete datasource
+11. system owner/admin publish app
+12. system owner/admin set app viewer
+13. dashborad owner select app from app market
+14. dashborad owner create dashboard
+15. dashborad owner assign admin, viewer
+16. dashborad owner/admin update dashboard
+17. dashborad owner change owner
+18. dashborad viewer get dashboard
+
+widget / datasource 
+create / read / update / delete / publish 
+
+owner / admin / editor / viewer
+dashboard 
+read / update / delete / transfre owner / add members / remove members 
+
+dashboard widgets 
+add widgets to dashboard / remove / view 
+
+Q1: dashboard and widget是否需要binding? binding完的resource叫什麼? 也就是market上面的 權限如何設定?
+Q2: 可能還要區分一個moderator / owner 看system 的權限, moderator可以看所有的
+Q3: moderator 要有設owner的權利
+Q4: publish後的東西要如何決定誰能看到? 是否能CRUD?
+
+若我有一個RBAC的需求
+會分system scope and resource scope
+system scope會有 moderator / owner / admin / dev user / viewer 
+moderator 可以建立system, system name是key, 且會assign一個唯一的owner
+moderator 只有此一功能
+owner 可以assign owner / admin / dev user / viewer, assign owner代表換owner, 其他的role都可以有多數
+owner / admin / dev user 都可以建立system scope的resource, 例如data source跟widget, 但這些被建立出來的data source跟widget權限屬於這個system name, 也就是不管是 owner / admin / dev user / viewer , 只要這些身分屬於這個system name, 就可以看到這個system name所有的data source跟widget, 按了publish後可以產生app, 這個權限就會是resource scope
+resource scope會綁resource type跟resource id, role 會有owner / admin / viewer
+dashboard可以加入很多個app, dashboard也是resource scope
+
+post api/v1/user_roles/ 大量建立user-role-resource mapping
+{
+    "users": ["u_12345"],
+    "user_type": "member",
+    "role": "owner",
+    "resource_id": "r_9876",
+    "resource_type": "dashboard"
+}
+
+post api/v1/user_roles 大量建立user-role-resource mapping
+{
+    "users": ["u_12345"],
+    "user_type": "member",
+    "role": "owner",
+    "resource_id": "r_9876",
+    "resource_type": "dashboard"
+}
+
+post api/v1/user_roles/batch_delete 大量刪除user-role-resource mapping
+{
+    "users": ["u_12345"],
+    "user_type": "member",
+    "role": "owner",
+    "resource_id": "r_9876",
+    "resource_type": "dashboard"
+}
+get api/v1/user_roles?
+resource_type=xxx&resource_id=xxx (resource_id optional, resource_type optional)
+
+check  resource permissions api: post api/v1/permissions/check 
+{
+    "user_id": "u_12345",
+    "user_type": "member",
+    "permission": "dashboard.edit",
+    "resource_id": "r_9876",
+    "resource_type": "dashboard"
+}
+check system permissions api: post api/v1/permissions/check 
+{
+    "user_id": "u_12345",
+    "user_type": "member",
+    "permission": "app.create"
+}
