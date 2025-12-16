@@ -1,0 +1,74 @@
+{
+  "apis": [
+    {
+      "method": "POST",
+      "api": "/api/enterpriseaccount/v1/users",
+      "permissions": ["user.content.write"]
+    },
+    {
+      "method": "PUT",
+      "api": "/api/enterpriseaccount/v1/users/callback",
+      "permissions": []
+    },
+    {
+      "method": "PUT",
+      "api": "/api/enterpriseaccount/v1/users/resend/profile",
+      "permissions": ["user.content.write"]
+    },
+    {
+      "method": "PUT",
+      "api": "/api/enterpriseaccount/v1/users/resend",
+      "permissions": ["user.content.write"]
+    },
+    {
+      "method": "GET",
+      "api": "/api/enterpriseaccount/v1/users/invited",
+      "permissions": ["user.content.read"]
+    },
+    {
+      "method": "POST",
+      "api": "/api/enterpriseaccount/v1/users/registered",
+      "permissions": ["user.content.read"]
+    },
+    {
+      "method": "PUT",
+      "api": "/api/enterpriseaccount/v1/users/invited",
+      "permissions": ["user.content.write"]
+    },
+    {
+      "method": "PUT",
+      "api": "/api/enterpriseaccount/v1/users/registered",
+      "permissions": ["user.content.write"]
+    },
+    {
+      "method": "PUT",
+      "api": "/api/enterpriseaccount/v1/users/invited/remove",
+      "permissions": ["user.content.write"]
+    },
+    {
+      "method": "PUT",
+      "api": "/api/enterpriseaccount/v1/users/registered/remove",
+      "permissions": ["user.content.write"]
+    },
+    {
+      "method": "GET",
+      "api": "/api/enterpriseaccount/v2/links",
+      "permissions": ["user.content.read","advantage.read"]
+    },
+    {
+      "method": "GET",
+      "api": "/api/enterpriseaccount/v2/config",
+      "permissions": ["user.content.read","advantage.read"]
+    },
+    {
+      "method": "GET",
+      "api": "/api/enterpriseaccount/v1/accounts/limit",
+      "permissions": ["user.content.read"]
+    },
+    {
+      "method": "POST",
+      "api": "/api/enterpriseaccount/v1/users/csv",
+      "permissions": ["user.content.write"]
+    }
+  ]
+}
