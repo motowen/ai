@@ -1,0 +1,105 @@
+10. Get Dashboard Widget from Dashboard Widget market
+QUERY APPs (QUERY GraphQL)
+GET api/v1/user_roles/me?scope=resource&resource_type=widget (permission: resource.widget.read)
+[
+  {
+    "resource_id": "r_1",
+    "resource_type": "widget"
+  }
+]
+
+sequenceDiagram
+autonumber
+actor FE as Platform FE
+participant DWB as DWB BE
+participant RBAC as RBAC BE
+
+FE->>DWB: QUERY Dashboard Widgets (QUERY GraphQL)
+DWB->>RBAC: GET api/v1/user_roles/me?scope=resource&resource_type=widget (permission: resource.widget.read)
+RBAC-->>RBAC: check permission
+RBAC-->>RBAC: query the scope of the resource from user_roles DB
+RBAC-->>DWB: 200 [users[resource_id]]
+DWB-->>DWB: query the dashboard widgets from dashboard widget DB
+DWB-->>FE: 200 [widgets...]
+
+11. get dashboard
+QUERY dashboard (QUERY GraphQL)
+GET api/v1/user_roles/me?scope=resource&resource_type=dashboard (permission: resource.dashboard.read)
+[
+  {
+    "resource_id": "r_1",
+    "resource_type": "dashboard"
+  }
+]
+
+sequenceDiagram
+autonumber
+actor FE as Platform FE
+participant DASH as Dashboard BE
+participant RBAC as RBAC BE
+
+FE->>DASH: QUERY dashboard (QUERY GraphQL)
+DASH->>RBAC: GET api/v1/user_roles/me?scope=resource&resource_type=dashboard (permission: resource.dashboard.read)
+RBAC-->>RBAC: check permission
+RBAC-->>RBAC: query the scope of the resource from user_roles DB
+RBAC-->>DASH: 200 [users[dashboard]]
+DASH-->>DASH: query the dashboard from dashboard DB
+DASH-->>FE: 200 {dashboard...}
+
+12. Create dashboard
+Create dashboard (Mutation GraphQL)
+POST api/v1/user_roles/resources/owner (permission: na, resource_type=dashboard)
+
+sequenceDiagram
+autonumber
+actor FE as Platform FE
+participant DASH as Dashboard BE
+participant RBAC as RBAC BE
+
+FE->>DASH: Create dashboard (Mutation GraphQL)
+DASH->>RBAC: POST api/v1/user_roles/resources/owner (permission: na, resource_type=dashboard)
+RBAC-->>DASH: 200
+DASH-->>DASH: write dashboard metadata (dashboard DB)
+DASH-->>FE: 201
+
+13. Dashboard role assign
+POST api/v1/user_roles (permission: resource.dashboard.add_member)
+
+sequenceDiagram
+autonumber
+actor FE as Platform FE
+participant RBAC as RBAC BE
+
+FE->>RBAC: POST api/v1/user_roles (permission: resource.dashboard.add_member)
+RBAC-->>RBAC: check permission
+RBAC-->>RBAC: write user role (resource user_roles DB)
+RBAC-->>FE: 200
+
+13. Dashboard role remove
+DELETE api/v1/user_roles?user_id=xxx&scope=resource&resource_type=dashboard (permission: resource.dashboard.remove_member)
+
+sequenceDiagram
+autonumber
+actor FE as Platform FE
+participant RBAC as RBAC BE
+
+FE->>RBAC: DELETE api/v1/user_roles?user_id=xxx&scope=resource&resource_type=dashboard (permission: resource.dashboard.remove_member)
+RBAC-->>RBAC: check permission
+RBAC-->>RBAC: remove user role (resource user_roles DB)
+RBAC-->>FE: 200
+
+14. Dashboard owner transfer
+PUT api/v1/user_roles (permission: resource.dashboard.transfer_owner)
+
+sequenceDiagram
+autonumber
+actor FE as Platform FE
+participant RBAC as RBAC BE
+
+FE->>RBAC: DPUT api/v1/user_roles (permission: resource.dashboard.transfer_owner)
+RBAC-->>RBAC: check permission
+RBAC-->>RBAC: add new owner
+RBAC-->>RBAC: change original owner to admin
+RBAC-->>FE: 200
+
+15. Dashboard update (delete)
