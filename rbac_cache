@@ -1,0 +1,310 @@
+rbac cache:
+1) Cache-aside（Lazy loading）
+
+讀：先查 cache，miss 才查 DB，然後回填 cache
+
+寫：只寫 DB，成功後刪 cache 或 bump version（失效）
+
+優點：簡單、cache 不在寫入關鍵路徑；失效策略做對就很穩
+
+缺點：可能 stampede（要 singleflight），第一次讀會慢
+
+你目前的做法本質上是 cache-aside（但要補「miss 回填」與更好的失效）。
+
+2) Write-around
+
+寫：只寫 DB，不寫 cache
+
+讀：cache miss 才回填
+
+特點：寫入不會污染 cache（例如寫很多但很少讀的資料）
+
+缺點：寫完立刻讀可能 miss（但 RBAC 多數能接受）
+
+RBAC assignment 寫入通常用 write-around + 失效（del/bump）比較常見。
+
+3) Invalidation by version / epoch（版本化快取）
+
+不去刪一堆 key，而是：
+
+變更後 INCR authz:ver:<principal>（或 resource ver）
+
+cache key 帶 v<ver>，舊 key 自然變「不可達」
+
+優點：撤權近乎即時、很難漏、避免 pattern delete/scan
+
+缺點：key 會累積到 TTL 回收（TTL 太長會吃記憶體）
+
+這個在 RBAC 是「非常值得用」的失效機制，常搭配 cache-aside。
+
+4) Event-driven cache invalidation / push cache（事件驅動）
+
+RBAC 變更後發事件（NATS/Kafka/Redis pubsub…）
+
+消費者（RBAC service 自己、或各業務服務）收到後：
+
+刪 key / bump version / 更新本地 cache
+
+優點：更新很快，可減少每次 request 都查 RBAC
+
+缺點：事件可靠性、重播、補資料、最終一致窗口要處理
+
+適合你未來想從「每 request 打 RBAC」走向「本地 decision」時用。
+
+5) Local in-process cache（每個 RBAC instance 的 LRU/TTL）
+
+例：ristretto / bigcache / 自己做 map+TTL
+
+優點：最快、減 Redis 壓力，延遲最低
+
+缺點：多節點一致性差（所以最好只放「可容忍短暫過期」或搭配版本號）
+
+RBAC 很常做「兩層快取」：本機 LRU（極短 TTL）+ Redis（中 TTL）+ DB。
+
+6) Stale-While-Revalidate（SWR）
+
+cache 過期也先回舊值（stale），同時背景刷新
+
+優點：讀延遲穩、抗尖峰
+
+缺點：對 RBAC 有風險：撤權期間可能仍回 stale allow（不建議）
+
+除非你有版本號能保證撤權立即反映，否則 RBAC 不太適合 SWR。
+
+7) Negative caching（負快取）
+
+“沒有任何角色/沒有權限” 也快取（短 TTL）
+
+優點：防止不存在的 user/resource 反覆打 DB（cache penetration）
+
+缺點：寫入後要失效（不然新增角色會晚生效）
+
+RBAC 很值得做：例如 user 沒加入 system 也快取 30s~2m。
+
+8) Token/Claims cache（不是 Redis，但常一起討論）
+
+把 roles/permissions 或 authz_ver 放 JWT / session
+
+各服務本地判斷
+
+更新靠短 token + refresh、或 ver check、或事件推送
+
+這是「把 cache 搬到客戶端/各服務」的作法。
+
+二、可以混用嗎？
+
+可以，而且應該混用。但混用要遵守一個原則：
+
+同一份資料只選一個“主策略”（寫入/失效的真相來源），其他層只是加速層，不要各自為政。
+
+三、RBAC 最常見、最穩的混用組合（推薦）
+組合 A：Cache-aside + 版本號失效 + 兩層快取（本機 + Redis）
+
+寫：DB 成功 → INCR authz:ver:<user>（必要時也 bump resource ver）
+
+讀：
+
+讀 ver（可本機快取 1~5s）
+
+用 ver 組 key 查 Redis（roles/permissions 展開結果）
+
+miss 才查 Mongo，回填 Redis
+
+本機 LRU 再加速（TTL 1~10s）
+
+優點：撤權快、幾乎不會漏、Redis/DB 壓力可控
+這套也能支援你前面提的「TTL 設很長」。
+
+組合 B：每 request 打 RBAC（你現在） + RBAC 內部 Redis cache-aside + singleflight
+
+對你目前最小改動、最容易落地
+
+之後如果 RBAC QPS 再上去，再加本機 LRU 或事件推送
+
+組合 C：本地 decision（各服務）+ authz_ver 檢查（Redis）+ 事件推送（可選）
+
+request path 只做：
+
+驗 JWT
+
+讀 authz_ver（或訂閱更新到本機）
+
+ver 沒變就用本地 cache 的 roles/permissions
+
+大幅減少 RBAC service 壓力，但工程複雜度高一階
+
+四、哪些混用很容易出事（避免）
+
+write-through + cache-aside 同時對同一 key 寫入：很容易 race、不一致
+
+大量 pattern delete（SCAN）+ 長 TTL：寫入變更時延遲抖動、且容易漏刪造成長期錯
+
+SWR（先回 stale allow）：RBAC 不加版本號時風險大
+
+如果你要我給「你這個 RBAC7 最適合的組合」：
+在你說的「每次 request 都打 RBAC service」前提下，我會選 組合 A/B 的折衷：
+
+RBAC service 內：Redis cache-aside + 版本號失效（把 SCAN 刪掉）
+
+再加 singleflight（避免 miss 打爆 Mongo）
+
+本機 LRU 可先不做或只做 ver 快取（很小改動）
+
+
+1) Cache-Aside (Lazy Loading / Read-Aside)
+
+讀：先查 cache，miss 才查 DB，然後回填 cache
+寫：只寫 DB，然後刪/失效 cache（或 bump version）
+
+優點：實作簡單、cache 不影響寫入正確性
+
+缺點：首次 miss 會 hit DB；會有 stampede（需 singleflight）
+
+RBAC 最常用（尤其你現在每 request 都打 RBAC service）
+
+你目前的方向其實就是 Cache-Aside。
+
+2) Write-Behind (Write-Back / Async Write)
+
+寫：先寫 cache，背景再寫 DB（或批次 flush）
+
+優點：寫入快、可合併寫
+
+缺點：DB 可能落後、故障會丟資料、對一致性要求高的權限資料很危險
+
+RBAC 通常 不建議（除非是非關鍵、可重建的衍生統計資料）
+
+3) Refresh-Ahead (Proactive Refresh / Warm Cache)
+
+key 快過期前，背景先刷新，讓讀取永遠命中
+
+優點：降低 miss、穩定延遲
+
+缺點：需要背景 worker、要避免刷新風暴
+
+適合：熱門 resource 的 member list、role-permission mapping 等
+
+RBAC 可以用在「高熱 key」，但撤權仍要靠失效/版本號
+
+4) Negative Caching（負快取）
+
+「不存在」或「沒有權限」也 cache 一段時間
+
+優點：擋住大量不存在 user/resource 的 DB 打擊（anti-enumeration 場景也常見）
+
+風險：若沒有版本號/失效，剛被授權的人可能要等 TTL 才生效
+
+適用：
+
+“user 在這個 namespace 沒角色”
+
+“這個 resource 根本不存在（但要小心資訊洩漏）”
+
+RBAC 常用，但 TTL 通常短（例如 10~60 秒）或搭配版本號
+
+5) Versioned Cache / Epoch-based Invalidation（版本號失效）
+
+（這不是 read/write through，而是「失效策略」的核心手段）
+
+所有 cache key 都帶版本號：key:v<ver>
+任何授權變更只要 INCR ver，不需要掃描刪 key。
+
+優點：撤權幾乎即時、避免漏刪、TTL 可設長、非常適合 RBAC
+
+缺點：多一次 ver 讀取（通常 Redis GET 很便宜）
+
+RBAC 強推
+
+6) Two-Level Cache（L1 in-memory + L2 Redis）
+
+L1：每個 RBAC service instance 本地快取（超快）
+L2：Redis（跨 instance 共享）
+miss 才打 DB
+
+優點：降低 Redis 壓力、延遲更穩
+
+缺點：L1 失效要做（通常靠短 TTL 或 ver）
+
+RBAC 很常見：L1 TTL 1~5 秒、L2 TTL 分鐘~小時
+
+7) Push-based Cache Invalidation / Event-driven Cache（事件推送）
+
+寫入成功後發事件，訂閱者收到後刪 key 或 bump version
+
+優點：更新快，不靠輪詢
+
+缺點：工程複雜度、要處理重播/丟訊/重啟補償
+
+RBAC 可用，但通常仍搭配 TTL 當保底
+
+8) Materialized View / Projection Cache（預計算、投影表）
+
+把「判斷所需資料」預先算好，存成專用集合/表（Mongo collection / Redis hash）
+
+優點：讀非常快、邏輯集中
+
+缺點：要維護投影一致性、寫入更複雜
+
+適合：permission 展開很貴（例如 policy 很複雜）
+
+可以混用嗎？
+
+可以，而且 RBAC 幾乎一定要混用，原因是不同資料層需求不同：
+
+membership / assignment：要快、要能撤權即時
+
+role→permission mapping：變動低、可常駐
+
+最終 allow/deny 結果：高 QPS，但最容易出安全洞
+
+一個很實用的混用組合（建議你採用）
+
+以「每 request 都打 RBAC service」為前提：
+
+✅ 組合：Cache-Aside + Versioned Cache + Negative Cache + (可選)L1
+
+讀取流程
+
+先拿 authz:ver:<user>（Redis GET）
+
+用 ver 組 roles key 查 Redis
+
+命中：直接判斷
+
+miss：查 Mongo → Set roles（TTL 可長）→ 判斷
+
+若查到「沒有角色」，也寫負快取（短 TTL 或帶 ver）
+
+寫入流程
+
+DB 成功後：INCR authz:ver:<user>
+
+（必要時也 bump resource 版本 resver:<type>:<id>）
+
+可選 L1
+
+本地快取 ver→roles 幾秒鐘，降低 Redis QPS
+
+這樣你達成：
+
+不用 SCAN pattern delete
+
+不怕漏刪造成長期錯誤
+
+TTL 可以設長（回收用）
+
+Redis 掛了：fallback Mongo（只是變慢）
+
+RBAC 不太建議混用的：Write-Behind / Write-Back
+
+除非你 cache 的是「可重建的統計」例如 role_count（而且不是安全判斷核心），否則權限資料不建議 async 寫 DB。
+
+你可以怎麼決策（快速準則）
+
+只要涉及「允不允許」：用 Versioned Invalidation（或精準失效）+ TTL 保底
+
+只要涉及「存在/不存在」大量查詢：加 Negative cache
+
+QPS 很高：加 L1（短 TTL）+ singleflight
+
+變更頻率高 & key 很多：避免 DeletePattern/SCAN
