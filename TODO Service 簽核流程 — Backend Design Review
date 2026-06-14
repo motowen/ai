@@ -1,0 +1,272 @@
+# TODO Service 簽核流程 — Backend Design Review
+
+> 狀態：Draft · 供 design review 討論
+> 範圍：TODO Service 與 ACTR（Camunda）/ 其他下游之間的 task 建立、簽核、關閉流程，以及 IBM MQ 非同步處理鏈路。
+
+---
+
+## 1. 背景與目的
+
+TODO Service 負責管理簽核 task 的生命週期。上游（ACTR 內含 Camunda Process Engine、以及非常多其他下游 App）透過 `UpsertTask` / `CloseTask` API 建立與關閉 task；使用者透過 Web / Mobile FE 進行 approve / reject；TODO 再以 callback 將結果回拋給對應的下游。
+
+API 進來後並非同步處理，而是依類型發送 message 到對應的 IBM MQ 佇列（upsert / close / notify / retry），由各自的 consumer 非同步消化。本文件整理目前架構、三條主要流程，並標示一個已知的 **殘單（orphan task）競態問題** 作為本次 review 的核心討論點。
+
+---
+
+## 2. 系統概觀（Overall Architecture）
+
+```mermaid
+flowchart LR
+    subgraph clients["Clients"]
+        MobileFE["Mobile FE"]
+        WebFE["TODO Web FE"]
+    end
+
+    subgraph upstream["Upstream Systems"]
+        ACTR["ACTR Service<br/>Camunda Engine"]
+        APP1["Other App 1"]
+        APPN["Other App N"]
+    end
+
+    TODO["TODO Service"]
+
+    MobileFE -->|approve / reject| TODO
+    WebFE -->|approve / reject| TODO
+    ACTR -->|UpsertTask / CloseTask| TODO
+    APP1 -->|UpsertTask| TODO
+    APPN -->|UpsertTask| TODO
+
+    subgraph mq["IBM MQ"]
+        UpsertMQ["Upsert MQ"]
+        CloseMQ["Close MQ"]
+        NotifyMQ["Notify MQ"]
+        RetryMQ["Retry MQ"]
+    end
+
+    TODO -->|publish upsert| UpsertMQ
+    TODO -->|publish close| CloseMQ
+    TODO -->|publish notify| NotifyMQ
+    TODO -->|publish retry| RetryMQ
+
+    UpsertConsumer["Upsert Consumer"]
+    CloseConsumer["Close Consumer"]
+    NotifyConsumer["Notify Consumer"]
+    RetryConsumer["Retry Consumer"]
+
+    UpsertMQ --> UpsertConsumer
+    CloseMQ --> CloseConsumer
+    NotifyMQ --> NotifyConsumer
+    RetryMQ --> RetryConsumer
+
+    DB[(TODO DB)]
+    UpsertConsumer -->|Save Task| DB
+    CloseConsumer -->|Clear Task| DB
+    NotifyConsumer -->|push 通知| NOTIFY["通知目標 / 下游"]
+    RetryConsumer -.->|重投| TODO
+
+    TODO -->|Callback Result Y/N| ACTR
+    TODO -->|Callback Result Y/N| APP1
+    TODO -->|Callback Result Y/N| APPN
+```
+
+---
+
+## 3. 元件職責
+
+| 元件 | 職責 |
+| --- | --- |
+| ACTR Service（Camunda Engine） | 簽核流程編排，依站點（stage）發 `UpsertTask` / `CloseTask` 給 TODO |
+| 其他下游 App（App 1 ~ App N） | 呼叫 `UpsertTask` 建立 task；接收 callback 結果 |
+| Web / Mobile FE | 使用者 approve / reject task 的入口 |
+| TODO Service | 收 API → 發對應 message 到 MQ；收 action → callback 回下游；收 `Result=Y` → 發 close message |
+| Upsert MQ / Consumer | upsert message → 寫入 DB（建立 / 更新 task） |
+| Close MQ / Consumer | close message → 清空 DB（關閉 task） |
+| Notify MQ / Consumer | 後續通知（推測：推播 / 通知下游，**待確認**） |
+| Retry MQ / Consumer | 失敗重試 / 重投（推測，**待確認**） |
+| TODO DB | task 資料表 |
+
+---
+
+## 4. 流程
+
+### 4.1 正常 Task 生命週期
+
+涵蓋 task 建立 → 使用者簽核 → callback → 依 `Result` 關閉或保留。
+
+```mermaid
+sequenceDiagram
+    participant ACTR
+    participant User
+    participant TODO
+    participant UpsertMQ
+    participant CloseMQ
+    participant UpsertConsumer
+    participant CloseConsumer
+    participant DB
+
+    ACTR->>TODO: UpsertTask API
+    TODO->>UpsertMQ: publish upsert message
+    UpsertMQ->>UpsertConsumer: consume
+    UpsertConsumer->>DB: Save Task
+    Note over ACTR,DB: Task Created
+
+    User->>TODO: Approve / Reject Task
+    TODO->>ACTR: Callback Action
+    alt Result = Y
+        ACTR-->>TODO: Result = Y
+        TODO->>CloseMQ: publish close message
+        CloseMQ->>CloseConsumer: consume
+        CloseConsumer->>DB: Clear Task
+        Note over ACTR,DB: Task Closed
+    else Result = N
+        ACTR-->>TODO: Result = N
+        Note over TODO,DB: 保留 task，依重試 / 通知策略處理
+    end
+```
+
+### 4.2 Skip Same Approver 多站流程
+
+情境：站 1 簽核人 = A；站 2 為平簽（A 或 B 任一人即可）。啟用 skip same approver 後，因為 A 已在站 1 簽過，站 2 中的 A 會被自動跳過，使站 2 直接視為完成。**關鍵：B 從未真正簽核**——`UpsertTask(Stage2-B)` 建立了 B 的 task，緊接著就被 `CloseTask(Stage2-B)` 關閉。
+
+```mermaid
+sequenceDiagram
+    participant Camunda
+    participant UserA
+    participant TODO
+    participant UpsertMQ
+    participant CloseMQ
+    participant UpsertConsumer
+    participant CloseConsumer
+    participant DB
+
+    Note over Camunda: Stage1 Approver = A
+    Camunda->>TODO: UpsertTask(Stage1-A)
+    TODO->>UpsertMQ: publish upsert(Stage1-A)
+    UpsertMQ->>UpsertConsumer: consume
+    UpsertConsumer->>DB: Create Task Stage1-A
+
+    UserA->>TODO: Approve
+    TODO->>Camunda: Callback(Stage1-A Approve)
+    Camunda-->>TODO: Result = Y
+    TODO->>CloseMQ: publish close(Stage1-A)
+    CloseMQ->>CloseConsumer: consume
+    CloseConsumer->>DB: Clear Task Stage1-A
+    Note over Camunda: Stage1 Completed
+
+    Note over Camunda: Stage2 Parallel Any-One (A or B)
+    Camunda->>TODO: UpsertTask(Stage2-B)
+    TODO->>UpsertMQ: publish upsert(Stage2-B)
+    Note over Camunda: Process Stage2-A → skip same approver<br/>Stage2 completed, Stage2-A 不發任何 API
+    Camunda->>TODO: CloseTask(Stage2-B)
+    TODO->>CloseMQ: publish close(Stage2-B)
+    Note over Camunda: Process End（B 從未 approve）
+
+    Note over UpsertMQ,CloseMQ: 兩條佇列無共同排序保證
+    rect rgb(250, 235, 235)
+    CloseMQ->>CloseConsumer: consume close(Stage2-B) 先到
+    CloseConsumer->>DB: Delete Stage2-B → 查無資料 no-op
+    UpsertMQ->>UpsertConsumer: consume upsert(Stage2-B) 後到
+    UpsertConsumer->>DB: Create Stage2-B → 殘單
+    end
+```
+
+### 4.3 Camunda + TODO 完整互動
+
+整合兩站流程：站 1 含 `Result=Y/N` 分支，站 2 含 skip same approver 與殘單競態。
+
+```mermaid
+sequenceDiagram
+    participant Camunda
+    participant UserA
+    participant TODO
+    participant UpsertMQ
+    participant CloseMQ
+    participant UpsertConsumer
+    participant CloseConsumer
+    participant DB
+
+    Note over Camunda: Process Start
+
+    Note over Camunda: Stage1 Approver = A
+    Camunda->>TODO: UpsertTask(Stage1-A)
+    TODO->>UpsertMQ: publish upsert
+    UpsertMQ->>UpsertConsumer: consume
+    UpsertConsumer->>DB: Save Task Stage1-A
+
+    UserA->>TODO: Approve / Reject
+    TODO->>Camunda: Callback(Stage1-A)
+    alt Result = Y
+        Camunda-->>TODO: Result = Y
+        TODO->>CloseMQ: publish close(Stage1-A)
+        CloseMQ->>CloseConsumer: consume
+        CloseConsumer->>DB: Clear Task Stage1-A
+        Note over Camunda: Stage1 Completed
+    else Result = N
+        Camunda-->>TODO: Result = N
+        Note over TODO,DB: 保留 task，流程中止 / 退回
+    end
+
+    Note over Camunda: Stage2 Parallel Any-One (A or B)
+    Camunda->>TODO: UpsertTask(Stage2-B)
+    TODO->>UpsertMQ: publish upsert(Stage2-B)
+    Note over Camunda: Process Stage2-A → skip same approver<br/>Stage2 completed, Stage2-A 不發任何 API
+    Camunda->>TODO: CloseTask(Stage2-B)
+    TODO->>CloseMQ: publish close(Stage2-B)
+    Note over Camunda: Process End（B 從未 approve）
+
+    Note over UpsertMQ,CloseMQ: upsert / close 不同佇列，無共同排序
+    rect rgb(250, 235, 235)
+    Note over UpsertConsumer,DB: 異常時序：close 先於 upsert 被消費
+    CloseMQ->>CloseConsumer: consume close(Stage2-B)
+    CloseConsumer->>DB: Delete Stage2-B → no-op
+    UpsertMQ->>UpsertConsumer: consume upsert(Stage2-B)
+    UpsertConsumer->>DB: Create Stage2-B → 殘單
+    end
+```
+
+---
+
+## 5. 已知問題：殘單（Orphan Task）競態
+
+### 5.1 根因
+
+對同一個 task，`UpsertTask(Stage2-B)` 與 `CloseTask(Stage2-B)` 由 Camunda 幾乎同時連續發出，TODO 將兩者分別 publish 到 **Upsert MQ** 與 **Close MQ** 兩條獨立佇列。兩條佇列之間沒有共同的順序保證，consumer 也各自獨立消費，因此 close 可能先於 upsert 被處理。
+
+### 5.2 觸發時序
+
+1. `CloseTask(Stage2-B)` 的 close message 先被 Close Consumer 消費。
+2. 此時 DB 尚未有 Stage2-B 的紀錄 → 刪除為 no-op，沒有任何效果。
+3. `UpsertTask(Stage2-B)` 的 upsert message 後被 Upsert Consumer 消費。
+4. DB 寫入 Stage2-B → 這筆 task 已沒有對應的 close 動作會再到達 → 成為永遠關不掉的 **殘單**。
+
+### 5.3 為何 skip same approver 特別容易踩到
+
+平簽 + skip same approver 會產生「建立後立即關閉、且中間沒有真人簽核」的 task。`upsert` 與 `close` 的時間間隔極短，正好落在兩條佇列亂序的時間窗內，使競態從理論風險變成實際高機率事件。
+
+### 5.4 影響
+
+- DB 累積無法關閉的殘單，task 列表與下游狀態不一致。
+- 下游（約 500 個）對 task 狀態的認知與 TODO DB 分歧，後續對帳困難。
+
+---
+
+## 6. 候選解法方向（待討論，尚未定案）
+
+以下為 review 時可評估的方向，各有取捨：
+
+- **合併佇列 / FIFO**：upsert 與 close 對同一 task 走同一條 FIFO 佇列（以 task id 為 group），消除跨佇列亂序。需評估對吞吐與其他 message 類型的影響。
+- **版本化 idempotent 狀態機**：每個 message 帶單調遞增版本／狀態，consumer 以「只接受較新狀態」方式處理，late upsert 不得覆蓋已 close 的狀態。
+- **Tombstone / TASK_REGISTRY**：close 先到時寫入 tombstone，後到的 upsert 檢查 tombstone 後直接放棄建立。
+- **Transactional Outbox**：解決 TODO 端 DB 寫入與 MQ 發送的 dual-write 問題，確保發送與狀態一致（與上述排序方案互補，非互斥）。
+
+> 註：以上方向需配合「TODO 端寫 DB 與發 MQ 是否在同一交易邊界」一併評估，否則排序方案仍可能被 dual-write 不一致破壞。
+
+---
+
+## 7. 待確認事項
+
+1. **Notify / Retry Consumer 行為**：本文件假設 notify 為推播通知、retry 為重投回 TODO，皆未直接寫 TODO DB。實際職責請確認。
+2. **其他下游是否會自行發 `CloseTask`**：目前假設僅 ACTR 的 Camunda 依站點發 `CloseTask`，其他下游只發 `UpsertTask`。若有例外需更新架構圖。
+3. **`Result=N` 的後續策略**：reject / 下游回失敗時，task 是保留、退回、或進入 retry 佇列，需明確定義。
+4. **close 對不存在 task 的語意**：目前為 no-op；是否應改為「記錄 tombstone」以支援後到 upsert 的判斷。
+5. **同一 task 的 message 是否已有 ordering key / partition key**：決定 FIFO 方案的可行性。
